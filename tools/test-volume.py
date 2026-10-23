@@ -1,6 +1,7 @@
 """Opt-in synthetic volume test on an owned, hardware-free PipeWire server.
 
-Never connects to the desktop server, starts WirePlumber policy, or loads devices.
+Never connects to the desktop server or loads devices. --pulse additionally runs
+WirePlumber's policy-only profile and a private Pulse server/recording stream.
 Requires existing PipeWire/GStreamer/Wp runtimes and permission to bind a private
 Unix socket. All configuration, logs and sockets stay under build/.
 """
@@ -9,6 +10,7 @@ import math
 import os
 from pathlib import Path
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -30,7 +32,9 @@ context.modules = [
     { name = libpipewire-module-metadata }
 ]
 context.objects = [
-    { factory = spa-node-factory args = { factory.name = support.node.driver node.name = Driver } }
+    { factory = spa-node-factory args = {
+        factory.name = support.node.driver node.name = Driver priority.driver = 200000
+    } }
     { factory = metadata args = { metadata.name = default } }
 ]
 '''
@@ -44,6 +48,111 @@ context.modules = [
     { name = libpipewire-module-metadata }
 ]
 '''
+
+
+def probe_idle_negotiation(registry, wait, node, start):
+    """Real source with a consumer before its first buffer, then idle arrivals."""
+    from streaming import AudioDriver, Gst, make_capture, make_output
+    from routing import Wp, FEATURES
+    from volume import Volume
+
+    for cycle in range(3):
+        failures, owned_links, consumers = [], [], []
+        driver = AudioDriver(failures.append, registry.changed)
+        capture = Gst.parse_launch('audiotestsrc is-live=true samplesperbuffer=480 freq=160 volume=0.2 ! '
+            'audio/x-raw,format=F32LE,rate=48000,channels=1 ! '
+            'appsink name=frames emit-signals=true sync=false async=false')
+        driver.capture = capture
+        capture.get_by_name('frames').connect('new-sample', driver._sample)
+        output, app, _sink = make_output(f'idle-{cycle}', Volume((0.125,), False))
+        driver.output = output
+        first_buffer, allow_buffer = threading.Event(), threading.Event()
+        def need_data(source, length):
+            if not first_buffer.is_set():
+                first_buffer.set()
+                allow_buffer.wait(5)
+            driver._need_data(source, length)
+        app.connect('need-data', need_data)
+        driver._watch_bus(capture)
+        driver._watch_bus(output)
+
+        def checked(predicate):
+            if failures: raise AssertionError(failures)
+            driver.renew()
+            return predicate()
+
+        def connect(source_id, target_name):
+            def endpoints():
+                target = node(target_name)
+                if target is None: return None
+                objects = registry.snapshot()['objects']
+                ports = [next((o['id'] for o in objects if o['kind'] == 'Port' and
+                    o['props'].get('node.id') == str(ident) and
+                    o['props'].get('port.direction') == direction), None)
+                    for ident, direction in [(source_id, 'out'), (target['id'], 'in')]]
+                return ports if all(p is not None for p in ports) else None
+            wait(lambda: checked(endpoints), 'Synthetic link ports did not register.')
+            source_port, input_port = endpoints()
+            props = Wp.Properties.new_empty()
+            for key, value in {'link.output.port': source_port, 'link.input.port': input_port,
+                    'object.linger': 'false', 'link.passive': 'false'}.items(): props.set(key, str(value))
+            link = Wp.Link.new_from_factory(registry.core, 'link-factory', props)
+            owned_links.append(link)
+            link.activate(FEATURES, None, lambda obj, result: obj.activate_finish(result))
+            return link
+
+        try:
+            driver.renew()
+            driver.request_capture(True)
+            driver._start_pipeline(output, 'output')
+            wait(lambda: checked(lambda: driver.capture_running and driver.fresh_capture and
+                node('noise_cancellation.clean_microphone') and first_buffer.is_set()),
+                'Startup did not reach real filtered frames and first output request.')
+            clean = node('noise_cancellation.clean_microphone')
+            _result, current, pending = output.get_state(100 * Gst.MSECOND)
+            assert current == Gst.State.PLAYING, f'Provider waiting for first-buffer preroll: {current}, {pending}'
+            for arrival in range(3):
+                if arrival:
+                    driver.request_capture(False)
+                    wait(lambda: checked(lambda: driver.capture_idle), 'Synthetic capture did not idle.')
+                token = f'consumer-{cycle}-{arrival}'
+                consumer, _source, sink = make_capture(token, clean['props']['object.serial'])
+                consumers.append(consumer)
+                start(consumer)
+
+                link = connect(clean['id'], f'noise_cancellation.{token}.capture')
+                allow_buffer.set()
+                samples = []
+
+                def receive():
+                    sample = sink.emit('try-pull-sample', 0)
+                    if sample is None: return False
+                    data = array.array('f')
+                    buffer = sample.get_buffer()
+                    data.frombytes(buffer.extract_dup(0, buffer.get_size()))
+                    samples.append(max(abs(value) for value in data))
+                    return True
+
+                wait(lambda: checked(receive), f'Late consumer stuck without idle silence; stage={driver.stage}.')
+                assert samples[-1] == 0, 'Idle source leaked nonzero samples.'
+                before = driver.frames
+                driver.request_capture(True)
+                wait(lambda: checked(lambda: driver.capture_running and driver.fresh_capture and driver.frames > before),
+                    'Capture did not produce fresh resume frames.')
+                driver.set_delivery(True)
+                wait(lambda: checked(lambda: receive() and samples[-1] > 0.0001),
+                    'Late consumer never received actual nonzero filtered audio after resume.')
+                consumer.set_state(Gst.State.NULL)
+                link.request_destroy()
+            assert not failures, failures
+        finally:
+            allow_buffer.set()
+            driver.close()
+            for consumer in consumers: consumer.set_state(Gst.State.NULL)
+            for link in owned_links:
+                try: link.request_destroy()
+                except Exception: pass
+        wait(lambda: node('noise_cancellation.clean_microphone') is None, 'Stopped probe source remained registered.')
 
 
 def probe():
@@ -191,34 +300,67 @@ def probe():
         assert default_name(metadata, CONFIGURED) == clean_name, 'Saved Clean preference was changed.'
         output.set_state(Gst.State.NULL)
         wait(lambda: node(clean_name) is None, 'Clean source did not disappear after the handoff.')
-        print('Private native test passed: volume/mute, unity output gain and default-input handoff before source removal.')
+        probe_idle_negotiation(registry, wait, node, start)
+        print('Private native test passed: volume/mute, unity gain, input handoff, '
+            'early consumers and nonzero filtered audio after idle/resume.')
     finally:
         registry.close()
         for pipeline in reversed(pipelines): pipeline.set_state(Gst.State.NULL)
 
 
 def main():
+    if sys.argv[1:] == ['--pulse-probe']:
+        if os.environ.get('NOISE_CANCELLATION_PRIVATE_VOLUME_TEST') != '1':
+            raise SystemExit('Use the parent runner to create an isolated server.')
+        sys.path.insert(0, str(ROOT / 'extension/worker'))
+        import faulthandler
+        faulthandler.enable()
+        from routing_probe import probe as pulse_probe
+        pulse_probe()
+        return
     if sys.argv[1:] == ['--probe']:
         if os.environ.get('NOISE_CANCELLATION_PRIVATE_VOLUME_TEST') != '1':
             raise SystemExit('Use the parent runner to create an isolated server.')
+        import faulthandler
+        faulthandler.dump_traceback_later(15)
         probe()
+        faulthandler.cancel_dump_traceback_later()
         return
-    if sys.argv[1:]: raise SystemExit('Usage: python3 -B tools/test-volume.py')
+    policy = sys.argv[1:] == ['--pulse']
+    if sys.argv[1:] and not policy: raise SystemExit('Usage: python3 -B tools/test-volume.py [--pulse]')
     program = shutil.which('pipewire')
     if not program: raise SystemExit('Blocked: existing pipewire executable is required.')
+    if policy:
+        missing = [name for name in ['pipewire-pulse', 'wireplumber', 'pactl'] if not shutil.which(name)]
+        if missing: raise SystemExit('Blocked: existing test runtimes required: ' + ', '.join(missing))
     (ROOT / 'build').mkdir(exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='volume-', dir=ROOT / 'build') as directory:
         root = Path(directory)
         config = root / 'private.conf'
-        config.write_text(CONFIG)
+        server_config = CONFIG
+        if policy:
+            server_config = server_config.replace('audio.convert.* =',
+                'audiotestsrc = audiotestsrc/libspa-audiotestsrc audio.convert.* =')
+            server_config = server_config.replace('{ factory = metadata args = { metadata.name = default } }', '''
+    { factory = adapter args = {
+        factory.name = audiotestsrc node.name = routing_probe.physical
+        node.description = "Synthetic physical microphone" media.class = Audio/Source
+        priority.driver = 2000
+        audio.channels = 1 audio.rate = 48000 audio.position = [ MONO ]
+        node.param.Props = { live = true frequency = 160 volume = 0.2 }
+    } }
+''')
+        config.write_text(server_config)
         (root / 'client.conf').write_text(CLIENT_CONFIG)
         env = {**os.environ, 'PIPEWIRE_RUNTIME_DIR': directory, 'PIPEWIRE_REMOTE': 'pw',
             'PIPEWIRE_CONFIG_DIR': directory, 'PIPEWIRE_CONFIG_PREFIX': '',
             'PIPEWIRE_CONFIG_NAME': 'client.conf', 'XDG_CONFIG_HOME': directory,
+            'XDG_STATE_HOME': str(root / 'state'), 'XDG_RUNTIME_DIR': directory,
             'GST_REGISTRY': str(ROOT / 'build/gst-registry.bin'), 'PYTHONDONTWRITEBYTECODE': '1',
             'DBUS_SESSION_BUS_ADDRESS': f'unix:path={root}/no-bus',
             'DISPLAY': '', 'WAYLAND_DISPLAY': '',
             'NOISE_CANCELLATION_PRIVATE_VOLUME_TEST': '1'}
+        children = []
         with (root / 'server.log').open('w+') as log:
             daemon = subprocess.Popen([program, '-c', 'private.conf'],
                 env={**env, 'PIPEWIRE_CONFIG_NAME': 'private.conf'}, stdout=log, stderr=log)
@@ -229,9 +371,43 @@ def main():
                 if not (root / 'pw').exists():
                     log.seek(0)
                     raise SystemExit('Blocked: private PipeWire socket could not start.\n' + log.read(4000))
-                subprocess.run([sys.executable, '-B', str(Path(__file__).resolve()), '--probe'],
-                    env=env, check=True, timeout=35)
+                if policy:
+                    pulse_socket = root / 'pulse-native'
+                    env['PULSE_SERVER'] = f'unix:{pulse_socket}'
+                    (root / 'pulse.conf').write_text(CLIENT_CONFIG.replace(']\n',
+                        '{ name = libpipewire-module-protocol-pulse args = { '
+                        f'server.address = [ "unix:{pulse_socket}" ] }} }} ]\n'))
+                    children.append(subprocess.Popen(['wireplumber', '--profile=policy'],
+                        env={key: value for key, value in env.items() if not key.startswith('PIPEWIRE_CONFIG_')},
+                        stdout=log, stderr=log))
+                    children.append(subprocess.Popen(['pipewire-pulse', '-c', 'pulse.conf'],
+                        env={**env, 'PIPEWIRE_CONFIG_NAME': 'pulse.conf'}, stdout=log, stderr=log))
+                    deadline = time.monotonic() + 3
+                    while not pulse_socket.exists() and time.monotonic() < deadline: time.sleep(0.01)
+                    if not pulse_socket.exists():
+                        log.seek(0); print(log.read(12000), file=sys.stderr)
+                        raise RuntimeError('Private Pulse server did not start.')
+                try:
+                    with subprocess.Popen([sys.executable, '-B', str(Path(__file__).resolve()),
+                            '--pulse-probe' if policy else '--probe'], env=env, start_new_session=True) as probe_child:
+                        try:
+                            result = probe_child.wait(timeout=55)
+                            if result: raise subprocess.CalledProcessError(result, probe_child.args)
+                        finally:
+                            # Includes fixture workers if the probe itself hung/crashed.
+                            try: os.killpg(probe_child.pid, signal.SIGKILL)
+                            except ProcessLookupError: pass
+                    log.seek(0)
+                    if any('node_set_param(' in line and 'failed' in line for line in log):
+                        raise AssertionError('Private server rejected an audio adapter format/port change.')
+                except Exception:
+                    log.seek(0); print(log.read(12000), file=sys.stderr)
+                    raise
             finally:
+                for child in reversed(children):
+                    child.terminate()
+                    try: child.wait(timeout=3)
+                    except subprocess.TimeoutExpired: child.kill(); child.wait(timeout=3)
                 daemon.terminate()
                 try: daemon.wait(timeout=3)
                 except subprocess.TimeoutExpired: daemon.kill(); daemon.wait(timeout=3)

@@ -79,7 +79,7 @@ class Registry:
             return
         self._objects[ident], self._ids[obj] = obj, ident
         self._signal(obj, 'notify::properties', lambda *_: self.changed())
-        if isinstance(obj, Wp.Link): self._signal(obj, 'state-changed', lambda *_: self.changed())
+        if isinstance(obj, (Wp.Link, Wp.Node)): self._signal(obj, 'state-changed', lambda *_: self.changed())
         self.changed()
 
     def _removed(self, _om, obj):
@@ -124,6 +124,7 @@ class Registry:
                 if value is None: value = global_properties.get(key)
                 if value is not None: props[key] = value
             entry = {'id': ident, 'kind': kind, 'props': props}
+            if isinstance(obj, Wp.Node): entry['state'] = obj.get_property('state').value_nick
             if isinstance(obj, Wp.Link):
                 state, _error = obj.get_state()
                 entry['state'] = state.value_nick

@@ -29,6 +29,9 @@ def structure(values):
 
 
 def stream_properties(token, suffix):
+    # PipeWire configures our fixed DSP ports itself. WirePlumber must observe
+    # them, rather than race the exact-link/startup path by reformatting a
+    # running adapter (including after a default-following stream moves).
     return structure({'node.name': OUTPUT_NAME if suffix == 'source' else f'noise_cancellation.{token}.{suffix}',
         'noise-cancellation.session': token,
         'node.description': 'Clean Microphone' if suffix == 'source' else 'Authorized microphone capture',
@@ -36,6 +39,7 @@ def stream_properties(token, suffix):
         'node.autoconnect': 'false', 'node.dont-reconnect': 'true', 'node.dont-fallback': 'true',
         'node.pause-on-idle': 'true', 'node.always-process': 'false',
         'audio.rate': '48000', 'audio.channels': '1', 'audio.position': '[ MONO ]',
+        'item.features.no-format': 'true',
         'adapter.auto-port-config': '{ mode = dsp monitor = false control = false position = preserve }',
         'media.class': 'Audio/Source' if suffix == 'source' else 'Stream/Input/Audio'})
 
@@ -80,6 +84,10 @@ def configure_output(pipeline, app, sink):
     app.set_property('max-bytes', 8 * 1920)
     app.set_property('max-buffers', 8)
     sink.set_property('sync', True)
+    # The source must become active before an early consumer negotiates its
+    # link, even when the first buffer or an idle flush is still pending.
+    # Clock synchronization stays enabled; only asynchronous preroll is disabled.
+    sink.set_property('async', False)
     sink.set_property('enable-last-sample', False)
 
 
@@ -153,6 +161,7 @@ class AudioDriver:
         self._delivery_generation = 0
         self._first_sample = True
         self._handoff_started = False
+        self._handoff_done_source = 0
 
     @property
     def frames(self): return self.processor.frames
@@ -314,6 +323,10 @@ class AudioDriver:
         bus.add_signal_watch()
         def message(_bus, msg):
             if self._stopped.is_set(): return
+            # Capture has been explicitly revoked/released for normal tile-off.
+            # Queued native EOS/errors from that release must not abort the
+            # still-silent output's default-input handoff.
+            if self._handoff_started and pipeline is self.capture: return
             if msg.type == Gst.MessageType.ERROR:
                 error, _debug = msg.parse_error()
                 self._error(f'GStreamer audio pipeline failed: {error.message[:240]}')
@@ -368,6 +381,8 @@ class AudioDriver:
                         self._queue.append(filtered[offset:offset + 1920])
             return Gst.FlowReturn.OK
         except Exception as error:
+            if self._stopped.is_set() or (self._handoff_started and self.processor.revoked):
+                return Gst.FlowReturn.FLUSHING
             self._error(str(error))
             return Gst.FlowReturn.ERROR
 
@@ -419,10 +434,20 @@ class AudioDriver:
         self.revoke()
         self.set_delivery(False)
         self.stage = 'releasing capture before default-input handoff'
+        def finish():
+            # A native core/metadata callback may complete the handoff. Closing
+            # its registry there destroys proxies while their dispatcher is
+            # still using them. Finish on the next control-loop turn instead.
+            if self._stopped.is_set() or self._handoff_done_source: return
+            def deferred():
+                self._handoff_done_source = 0
+                if not self._stopped.is_set(): done()
+                return GLib.SOURCE_REMOVE
+            self._handoff_done_source = GLib.idle_add(deferred)
         def complete():
             if not self._stopped.is_set():
-                try: self.registry.begin_handoff(session, lambda _success: done())
-                except Exception: done()
+                try: self.registry.begin_handoff(session, lambda _success: finish())
+                except Exception: finish()
             return GLib.SOURCE_REMOVE
         def run():
             callback = complete
@@ -433,7 +458,7 @@ class AudioDriver:
                     if previous.is_alive(): raise RuntimeError('Capture transition still pending.')
                 if self.capture: self.capture.set_state(Gst.State.NULL)
             except Exception:
-                callback = lambda: (done(), GLib.SOURCE_REMOVE)[1] if not self._stopped.is_set() else GLib.SOURCE_REMOVE
+                callback = lambda: (finish(), GLib.SOURCE_REMOVE)[1]
             finally:
                 GLib.idle_add(callback)
                 self._transitions.discard(threading.current_thread())
@@ -445,6 +470,9 @@ class AudioDriver:
         if self._stopped.is_set(): return
         self.revoke()
         self._stopped.set()
+        if self._handoff_done_source:
+            GLib.source_remove(self._handoff_done_source)
+            self._handoff_done_source = 0
         self.stage = 'stopping audio'
         for pipeline in [self.output, self.capture]:
             if pipeline: pipeline.set_state(Gst.State.NULL)

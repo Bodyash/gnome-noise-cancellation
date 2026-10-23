@@ -78,6 +78,11 @@ signal can reach Python after appsink moves to PAUSED. Use try-pull-sample with
 zero timeout; no sample during pause/flush is not EOS. Keep the EOS/error bus
 watch authoritative. Capture appsink must not wait for asynchronous preroll;
 readiness still requires the pinned route and fresh processed frames.
+Owned adapters preconfigure fixed DSP ports and declare `item.features.no-format`
+so WirePlumber does not reformat a running node. Observe native node states and
+revoke on owned capture/output `error`, including while idle. Defer final handoff
+cleanup out of native registry/core callbacks; disconnecting during their dispatch
+can crash. Cancel deferred completion on close and ignore late callbacks.
 Do not destroy an active picker item during its synchronous activation callback.
 Use existing GJS, Python unittest and synthetic fixtures without new frameworks.
 Write a failing regression test before core changes, implement, rerun relevant

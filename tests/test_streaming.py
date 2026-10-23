@@ -54,6 +54,12 @@ class StreamingTests(unittest.TestCase):
             driver._need_data(App(), 1920)
             self.assertEqual(delivered[-1], bytes(1920))
             pending[0](True)
+            self.assertNotIn(('output', Gst.State.NULL), calls,
+                'Handoff callback destroyed its own native registry during event dispatch')
+            deadline = time.monotonic() + 0.5
+            while ('output', Gst.State.NULL) not in calls and time.monotonic() < deadline:
+                GLib.MainContext.default().iteration(False)
+                time.sleep(0.002)
             self.assertIn(('output', Gst.State.NULL), calls)
         finally: driver.close()
 
@@ -74,6 +80,85 @@ class StreamingTests(unittest.TestCase):
         finally:
             driver.capture = None
             driver.close()
+
+    def test_closing_cancels_deferred_handoff_completion_and_ignores_late_callback(self):
+        pending, done = [], []
+        driver = AudioDriver(lambda _: None, lambda: None)
+        driver.registry = SimpleNamespace(begin_handoff=lambda _session, callback: pending.append(callback),
+            close=lambda: None)
+        try:
+            driver.stop_for_handoff(object(), lambda: done.append(True))
+            deadline = time.monotonic() + 0.5
+            while not pending and time.monotonic() < deadline:
+                GLib.MainContext.default().iteration(False)
+                time.sleep(0.002)
+            self.assertTrue(pending)
+            pending[0](True)
+            self.assertNotEqual(driver._handoff_done_source, 0)
+            driver.close()
+            self.assertEqual(driver._handoff_done_source, 0)
+            pending[0](True)
+            for _ in range(10): GLib.MainContext.default().iteration(False)
+            self.assertEqual(done, [])
+        finally: driver.close()
+
+    def test_owned_adapters_keep_their_self_configured_formats(self):
+        capture, source, _sink = make_capture('check', '0')
+        output, _app, target = make_output('check')
+        try:
+            for endpoint in [source, target]:
+                props = endpoint.get_property('stream-properties')
+                self.assertEqual(props.get_value('item.features.no-format'), 'true',
+                    'WirePlumber must not reformat an already running, self-configured adapter')
+                self.assertIn('mode = dsp', props.get_value('adapter.auto-port-config'))
+        finally:
+            capture.set_state(Gst.State.NULL)
+            output.set_state(Gst.State.NULL)
+
+    def test_handoff_ignores_queued_capture_eos_but_still_checks_output(self):
+        failures = []
+        driver = AudioDriver(failures.append, lambda: None)
+        capture, output = Gst.Pipeline.new(None), Gst.Pipeline.new(None)
+        driver.capture, driver.output = capture, output
+        driver._watch_bus(capture); driver._watch_bus(output)
+        driver._handoff_started = True
+        driver.revoke()
+        def dispatch(pipeline):
+            bus = pipeline.get_bus()
+            bus.set_flushing(False)
+            self.assertTrue(bus.post(Gst.Message.new_eos(pipeline)))
+            for _ in range(20): GLib.MainContext.default().iteration(False)
+        try:
+            dispatch(capture)
+            self.assertFalse(failures, 'Expected capture teardown interrupted the default-input handoff')
+            dispatch(output)
+            self.assertTrue(failures, 'Serving output still needs supervision during handoff')
+        finally: driver.close()
+
+    def test_processing_revoked_during_sample_does_not_abort_explicit_handoff(self):
+        failures = []
+        driver = AudioDriver(failures.append, lambda: None)
+        original = driver.processor
+        class Processor:
+            def __getattr__(self, name): return getattr(original, name)
+            def feed(self, _data):
+                driver._handoff_started = True
+                original.revoke()
+                raise ValueError('Processing was revoked.')
+        driver.processor = Processor()
+        buffer = Gst.Buffer.new_allocate(None, 1920, None)
+        buffer.fill(0, bytes(1920))
+        sample = Gst.Sample.new(buffer, Gst.Caps.from_string(
+            'audio/x-raw,format=F32LE,rate=48000,channels=1'), None, None)
+        class Sink:
+            def emit(self, *_args): return sample
+        try:
+            driver.renew(); driver.capture_requested = True
+            self.assertEqual(driver._sample(Sink()), Gst.FlowReturn.FLUSHING)
+            for _ in range(3): GLib.MainContext.default().iteration(False)
+            self.assertFalse(failures)
+            self.assertTrue(original.revoked)
+        finally: driver.close()
 
     def test_clean_volume_is_initialized_and_audio_gain_stays_unity(self):
         output, _app, target = make_output('test', Volume((0.125, 0.0625), True))
@@ -240,12 +325,55 @@ class StreamingTests(unittest.TestCase):
                 'Capture readiness comes from routing/fresh frames, not appsink preroll')
         finally: capture.set_state(Gst.State.NULL)
 
+    def test_output_reaches_playing_without_waiting_for_first_buffer(self):
+        # A default-input consumer can arrive while the provider's first buffer
+        # is still being prepared. Its link must not depend on sink preroll.
+        pipeline = Gst.Pipeline.new(None)
+        app, sink = Gst.ElementFactory.make('appsrc'), Gst.ElementFactory.make('fakesink')
+        configure_output(pipeline, app, sink)
+        pipeline.add(app); pipeline.add(sink); self.assertTrue(app.link(sink))
+        try:
+            self.assertNotEqual(pipeline.set_state(Gst.State.PLAYING), Gst.StateChangeReturn.FAILURE)
+            _result, current, pending = pipeline.get_state(100 * Gst.MSECOND)
+            self.assertEqual(current, Gst.State.PLAYING,
+                f'Independent output is waiting for preroll: {current}, pending {pending}')
+            # Idle flush must not reintroduce a PAUSED/preroll dependency either.
+            self.assertTrue(pipeline.send_event(Gst.Event.new_flush_start()))
+            self.assertTrue(pipeline.send_event(Gst.Event.new_flush_stop(False)))
+            _result, current, pending = pipeline.get_state(100 * Gst.MSECOND)
+            self.assertEqual(current, Gst.State.PLAYING,
+                f'Idle flush left output waiting for preroll: {current}, pending {pending}')
+        finally: pipeline.set_state(Gst.State.NULL)
+
+    def test_idle_flush_keeps_output_playing_without_another_buffer(self):
+        pipeline = Gst.Pipeline.new(None)
+        app, sink = Gst.ElementFactory.make('appsrc'), Gst.ElementFactory.make('fakesink')
+        configure_output(pipeline, app, sink)
+        pipeline.add(app); pipeline.add(sink); self.assertTrue(app.link(sink))
+        delivered = threading.Event()
+        sink.set_property('signal-handoffs', True)
+        sink.connect('handoff', lambda *_args: delivered.set())
+        try:
+            pipeline.set_state(Gst.State.PLAYING)
+            buffer = Gst.Buffer.new_allocate(None, 1920, None)
+            buffer.fill(0, bytes(1920))
+            buffer.pts = 0
+            buffer.duration = 10 * Gst.MSECOND
+            self.assertEqual(app.emit('push-buffer', buffer), Gst.FlowReturn.OK)
+            self.assertTrue(delivered.wait(0.5), 'Initial output buffer never reached the sink')
+            self.assertEqual(pipeline.get_state(100 * Gst.MSECOND)[1], Gst.State.PLAYING)
+            self.assertTrue(pipeline.send_event(Gst.Event.new_flush_start()))
+            self.assertTrue(pipeline.send_event(Gst.Event.new_flush_stop(False)))
+            _result, current, pending = pipeline.get_state(100 * Gst.MSECOND)
+            self.assertEqual(current, Gst.State.PLAYING,
+                f'Idle flush returned output to preroll: {current}, pending {pending}')
+        finally: pipeline.set_state(Gst.State.NULL)
+
     def test_output_stays_clock_paced_when_sink_discards_buffers(self):
         driver = AudioDriver(lambda _: None, lambda: None)
         pipeline = Gst.Pipeline.new(None)
         app, sink = Gst.ElementFactory.make('appsrc'), Gst.ElementFactory.make('fakesink')
         configure_output(pipeline, app, sink)
-        sink.set_property('async', False)
         pipeline.add(app); pipeline.add(sink); self.assertTrue(app.link(sink))
         driver.output = pipeline
         calls = []
@@ -273,7 +401,6 @@ class StreamingTests(unittest.TestCase):
         output = Gst.Pipeline.new(None)
         app, target = Gst.ElementFactory.make('appsrc'), Gst.ElementFactory.make('fakesink')
         configure_output(output, app, target)
-        target.set_property('async', False)
         target.set_property('signal-handoffs', True)
         delivered = []
         def delivered_sample(_target, buffer, _pad):

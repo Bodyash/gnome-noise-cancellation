@@ -169,6 +169,21 @@ class WorkerTests(unittest.TestCase):
         self.assertFalse(self.driver.capture_requested)
         self.assertNotIn('close', self.driver.calls)
 
+    def test_native_owned_node_error_revokes_even_while_idle(self):
+        for ident in [71, 90]:
+            with self.subTest(ident=ident):
+                self.setUp(); self.published()
+                self.assertEqual(self.session.activity, 'idle')
+                next(o for o in self.snapshot['objects'] if o['id'] == ident)['state'] = 'error'
+                self.session.update(self.snapshot)
+                self.assertTrue(self.driver.revoked, 'Native node error was mistaken for idle')
+                self.assertEqual(self.events[-1][0], 'fault')
+                self.assertIn('error', self.events[-1][1]['message'])
+                # A later healthy-looking node snapshot cannot restore this session.
+                next(o for o in self.snapshot['objects'] if o['id'] == ident)['state'] = 'running'
+                self.session.update(self.snapshot)
+                self.assertTrue(self.session.closed)
+
     def test_consumers_resume_only_verified_fresh_processing_then_suspend(self):
         self.published(); self.consumer()
         self.session.update(self.snapshot)

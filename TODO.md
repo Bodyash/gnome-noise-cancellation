@@ -2,6 +2,9 @@
 
 ## Next patch release
 
+- [ ] Retest intermittent enable timeout and OBS silence: repeat tile-on while OBS
+      follows Default, including rapid toggles and long idle/resume. Inspect the
+      last error if startup fails; a selected Clean source alone does not prove audio.
 - [ ] Retest OBS using system default with Bluetooth headphones: repeated tile-off
       must return to USB without a call-profile/noise-suppression interruption;
       tile-on must preserve the existing automatic Clean selection.

@@ -142,6 +142,8 @@ class Session:
         client = next((o for o in objects if o['id'] == client_id and o['kind'] == 'Client'), None)
         if not client or str(client['props'].get('application.process.id')) != str(self.pid):
             raise ValueError('Audio node is not owned by this worker.')
+        if node.get('state') == 'error':
+            raise ValueError(f'The owned {suffix} audio node entered an error state. Select the microphone again.')
         self._pin(client); self._pin(node)
         return node
 

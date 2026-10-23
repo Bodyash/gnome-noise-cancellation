@@ -22,7 +22,7 @@ flowchart TB
         Mixer["Session volume / mute binding"]
         Handoff["Bounded tile-off input handoff"]
         Capture["GStreamer capture"] --> Engine["Selected noise suppression engine"]
-        Engine --> Queue["Bounded filtered queue"] --> Output["GStreamer source"]
+        Engine --> Queue["Bounded filtered queue"] --> Output["Clocked GStreamer source<br/>no asynchronous preroll"]
         Supervisor -.-> Capture
         Supervisor -.-> Output
         Supervisor -.-> Mixer
@@ -78,7 +78,8 @@ sequenceDiagram
     Shell->>Shell: Check dependencies and fresh device identity
     Shell->>Worker: Prepare(session token, identity, frozen options)
     Worker->>Graph: Read selected microphone volume and mute
-    Worker->>Graph: Capture with autoconnect disabled
+    Worker->>Graph: Capture with fixed DSP ports, autoconnect disabled
+    Note over Worker,Graph: Owned adapters configure their ports once.<br/>WirePlumber observes them without reformatting.
     Worker->>Graph: Create exact physical-port link
     Graph-->>Worker: Pinned identity and unique active route
     Worker->>Worker: Process fresh frames with selected engine
@@ -167,11 +168,11 @@ stateDiagram-v2
         Resuming --> Suspending: Demand disappears
         note right of Idle
             Virtual source stays available.
-            Output supplies silence.
+            Output stays PLAYING, supplies silence.
             Default selection is not demand.
         end note
     }
-    Enabled --> Reconfigure: Identity, route or supervision lost
+    Enabled --> Reconfigure: Identity, route or supervision lost; native node error
     Enabled --> Stopped: User disables, resources reaped
     state "Reconfiguration required" as Reconfigure
     state "Disabled" as Stopped
@@ -195,7 +196,11 @@ same route and fresh processing are proven. Transitions have an eight-second lim
 Capture and output have independent pipelines. The virtual source stays registered
 as `noise_cancellation.clean_microphone` with a per-session ownership tag. Output
 uses a system clock and synchronized sink to serve paced silence while capture
-sleeps. The extension never changes the configured system default or hides privacy indicators;
+sleeps. The output sink disables asynchronous preroll: startup and idle flush must
+not leave the provider PAUSED waiting for a buffer while a consumer negotiates.
+Clock synchronization remains enabled. Capture readiness still requires the exact
+route and fresh processed frames; output state alone never authorizes delivery.
+The extension never changes the configured system default or hides privacy indicators;
 the indicator can linger during setup/resume and the idle settling window.
 
 Callbacks use zero-timeout sample pulls. A late `new-sample` callback after PAUSED
@@ -203,6 +208,13 @@ must never wait for PLAYING; EOS/errors remain authoritative on the bus. Deliver
 generations reject frames spanning a closed gate. Capture generations prevent an
 old callback's frame-count increment from being mistaken for fresh resume evidence.
 Native state changes never block the GLib linking/supervision thread.
+
+Both owned adapters declare `item.features.no-format=true` alongside their
+PipeWire `adapter.auto-port-config` DSP ports. WirePlumber still manages consumer
+links, but must not suspend/reformat these running nodes during its session-item
+activation. A competing Format/PortConfig change can fail and leave a consumer
+link in `init`. The registry observes node state as well as link state; an owned
+node entering `error` permanently faults the session even while capture is idle.
 
 ## Authorization and cleanup
 
@@ -250,6 +262,11 @@ deadline skips/ends the handoff and continues cleanup. The metadata reader cache
 only the two input-default keys from Wp signals; it avoids unsafe/unusable Wp 0.5
 Python metadata getter/iterator annotations. Native capture teardown stays off the
 control thread, and late handoff callbacks are cancelled on close.
+Handoff completion schedules final cleanup on the next GLib idle turn rather than
+disconnecting its WirePlumber core inside a native callback that is still dispatching.
+Closing cancels that pending completion; it cannot affect a later session.
+Expected capture teardown messages and in-flight DSP revocation after explicit
+stop do not abort this handoff; output errors remain authoritative.
 
 The existing 750 ms parent escalation deadline covers the entire stop, including
 handoff and native teardown. Faults, lost supervision, startup cancellation and

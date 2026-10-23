@@ -17,7 +17,7 @@ flowchart LR
 Select a physical microphone and enable it from Quick Settings. Choose
 **Clean Microphone** in your apps or make it your system default.
 
-- Physical capture sleeps when no app needs it; the virtual microphone stays available.
+- Physical capture sleeps when no app needs it; the virtual microphone stays ready for new apps.
 - Clean Microphone shares the selected microphone's volume and mute controls.
 - Turning it off hands the current system input back to the selected mic when needed.
 - Remembers your preferred microphone across login. Processing always starts disabled.

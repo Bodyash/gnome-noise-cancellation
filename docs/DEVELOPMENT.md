@@ -158,10 +158,32 @@ Checks cover initial volume, changes in both directions, mute, and actual nonzer
 samples proving that the virtual adapter does not apply gain twice. Native metadata
 checks also require capture removal before effective-default handoff and its
 acknowledgment before virtual-source removal, preserving the configured preference.
-No real Bluetooth profile/policy behavior is exercised. The fixture
-injects a known test signal at the filtered output boundary; regular headless
-tests exercise the real DSP engines separately. Desktop GNOME sliders, hardware
-mixer rounding and other distributions still require manual testing.
+No real Bluetooth profile/policy behavior is exercised. The volume check
+injects a known signal at the filtered output boundary. A separate negotiation
+probe uses real RNNoise with synthetic capture, delays the first provider buffer
+while a consumer connects, then connects consumers after native idle/flush across
+three sessions. It requires idle silence and actual nonzero downstream samples
+after resume. Regular headless tests exercise all three DSP engines. Desktop GNOME
+sliders, hardware mixer rounding and other distributions still require manual testing.
+
+For default-following recorder transitions, also run explicitly:
+
+```sh
+python3 -B tools/test-volume.py --pulse
+```
+
+This additionally needs existing `pipewire-pulse`, `wireplumber`, `pactl`, the
+GStreamer `pulsesrc` plugin and PipeWire's SPA audio test source. It starts private
+PipeWire/Pulse servers and WirePlumber's **policy-only** profile, without hardware
+monitors. All runtime/configuration/state paths stay under `build/`; the private
+Pulse socket is explicit, with no desktop fallback. One synthetic Pulse recorder
+stays alive across eight fresh worker processes, enable/handoff cycles and automatic restoration of the saved
+Clean preference and cork/idle/uncork transitions. It uses the real PipeWire capture
+pipeline, RNNoise, output pipeline, lifecycle demand logic and handoff cleanup;
+hardware authorization is represented by synthetic fixture identities. Actual
+nonzero downstream samples are required after each transition. Rejected adapter
+format changes, crashes and timeouts fail the test. It does not launch OBS, exercise
+Bluetooth policy, install dependencies or change any desktop configuration.
 
 ## GitHub Actions and releases
 
