@@ -1,0 +1,164 @@
+name: Test and release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch: # Test/package without publishing a release.
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: Headless tests and package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    container: archlinux:base
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Prepare disposable CI container
+        # This installs only in the hosted container, never on a user's desktop.
+        run: |
+          pacman -Syu --noconfirm --needed \
+            git python gjs gnome-shell libadwaita python-gobject \
+            gstreamer gst-plugins-base gst-plugins-bad gst-plugin-pipewire \
+            libwireplumber wireplumber rnnoise speexdsp
+
+      - name: Check out tagged source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Run all device-free tests
+        run: python3 -B tools/check.py --tests-only
+
+      - name: Verify installed GNOME 51 imports without starting Shell
+        env:
+          LD_LIBRARY_PATH: /usr/lib/gnome-shell:/usr/lib/mutter-51
+          GI_TYPELIB_PATH: /usr/lib/gnome-shell:/usr/lib/mutter-51
+        run: gjs -m tools/validate-shell.js
+
+      - name: Build and validate source-only ZIP
+        run: |
+          python3 tools/pack.py
+          python3 tools/validate.py
+
+      - name: Generate download checksum
+        working-directory: build
+        run: sha256sum -- *.shell-extension.zip > SHA256SUMS
+
+      - name: Retain test-passed package for analysis
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: extension-release
+          path: |
+            build/*.shell-extension.zip
+            build/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  analyze:
+    name: Shexli release gate
+    needs: check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out analysis gate
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up isolated analysis Python
+        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: '3.12'
+
+      - name: Download test-passed package
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: extension-release
+          path: build
+
+      - name: Verify package checksum
+        working-directory: build
+        run: sha256sum --check SHA256SUMS
+
+      - name: Install pinned analyzer in CI virtual environment
+        run: |
+          python3 -m venv build/shexli-venv
+          build/shexli-venv/bin/python -m pip install --disable-pip-version-check \
+            --only-binary=:all: shexli==0.2.1 tree-sitter==0.25.2 tree-sitter-javascript==0.25.0
+
+      - name: Analyze the actual release ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          packages=(build/*.shell-extension.zip)
+          if (( ${#packages[@]} != 1 )); then
+            echo 'Expected exactly one extension ZIP to analyze.' >&2
+            exit 1
+          fi
+          build/shexli-venv/bin/shexli "${packages[0]}" --format json > build/shexli-report.json
+          cat build/shexli-report.json
+          # Use the analyzer environment to verify its installed version. Preserve
+          # raw findings; only its documented, ZIP-checked Shell 51 bound is excepted.
+          build/shexli-venv/bin/python -B tools/check-shexli.py build/shexli-report.json \
+            --package "${packages[0]}"
+
+      - name: Retain analyzer report even when publication is blocked
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: shexli-report
+          path: build/shexli-report.json
+          if-no-files-found: warn
+          retention-days: 7
+
+  release:
+    name: Publish tagged release
+    needs: [check, analyze]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Download verified package
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: extension-release
+          path: release
+
+      - name: Verify downloads
+        working-directory: release
+        run: sha256sum --check SHA256SUMS
+
+      - name: Create release with extension ZIP and checksum
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG_NAME: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          assets=(release/*.shell-extension.zip)
+          if (( ${#assets[@]} != 1 )); then
+            echo 'Expected exactly one verified extension ZIP.' >&2
+            exit 1
+          fi
+          flags=()
+          if [[ "$TAG_NAME" == *-* ]]; then
+            flags+=(--prerelease)
+          fi
+          gh release create "$TAG_NAME" --verify-tag --generate-notes \
+            "${flags[@]}" "${assets[@]}" release/SHA256SUMS

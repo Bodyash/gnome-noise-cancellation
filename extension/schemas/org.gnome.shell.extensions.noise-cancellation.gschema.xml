@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.noise-cancellation" path="/org/gnome/shell/extensions/noise-cancellation/">
+    <key name="preferred-microphone" type="s">
+      <default>''</default>
+      <summary>Preferred physical microphone</summary>
+      <description>Versioned stable device preference, restored disabled at login only when unambiguous. Never stores live authorization or enables processing.</description>
+    </key>
+    <key name="last-error" type="s">
+      <default>''</default>
+      <summary>Last processing problem</summary>
+      <description>A bounded diagnostic message retained for troubleshooting. Contains no audio or authorization tokens.</description>
+    </key>
+    <key name="processing-settings" type="s">
+      <default>'{}'</default>
+      <summary>Processing engine and options</summary>
+      <description>Validated per-engine options. Never enables processing or permits automatic fallback.</description>
+    </key>
+  </schema>
+</schemalist>

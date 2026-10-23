@@ -1,0 +1,7 @@
+*.zip
+*.log
+__pycache__/
+.cache/
+build/
+runtime/
+gschemas.compiled

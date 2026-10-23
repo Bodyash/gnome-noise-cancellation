@@ -1,0 +1,11 @@
+{
+    "uuid": "noise-cancellation@bodyash.github.io",
+    "name": "Noise Cancellation",
+    "description": "Noise-suppressed Clean Microphone with explicit physical input and RNNoise, SpeexDSP or WebRTC processing. Native Quick Settings controls; bundled Python worker requires distro PyGObject, GStreamer/PipeWire and WirePlumber runtimes plus one engine. Experimental; GNOME 51 only.",
+    "shell-version": [
+        "51"
+    ],
+    "settings-schema": "org.gnome.shell.extensions.noise-cancellation",
+    "url": "https://github.com/bodyash/gnome-noise-cancellation",
+    "version": 1
+}
