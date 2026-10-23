@@ -86,7 +86,7 @@ sequenceDiagram
     Worker-->>Shell: Prepared proof + canonical options
     Shell->>Worker: Publish
     Worker->>Graph: Revalidate and create Clean Microphone
-    Worker->>Graph: Initialize volume/mute from physical mic; virtual gain stays unity
+    Worker->>Graph: Initialize volume/mute from physical mic, virtual gain stays unity
     Graph-->>Worker: Initial volume acknowledged
     Graph-->>Worker: Owned virtual source confirmed
     Worker-->>Shell: Active proof + virtual source identity
@@ -94,13 +94,13 @@ sequenceDiagram
     Note over Shell,Worker: Cancellation or stale generation stops the worker.<br/>Active is reported only after both proofs pass.
     User->>Shell: Turn noise cancellation tile off
     Shell->>Worker: Explicit stop with conditional input handoff
-    Worker->>Worker: Revoke processing; output serves silence
+    Worker->>Worker: Revoke processing, output serves silence
     Worker->>Graph: Release owned capture stream
     Graph-->>Worker: Capture node removed
     Worker->>Graph: If Clean is current input, hand current default to validated physical mic
     Graph-->>Worker: Metadata round trip acknowledged
     Graph-->>Worker: Existing consumers leave Clean (within stop deadline)
-    Worker->>Graph: Remove Clean Microphone; close owned connections
+    Worker->>Graph: Remove Clean Microphone and close owned connections
     Worker-->>Shell: Owned worker reaped
     User->>Shell: Disable extension
     Shell->>Worker: Gio.Subprocess.force_exit()
@@ -172,7 +172,7 @@ stateDiagram-v2
             Default selection is not demand.
         end note
     }
-    Enabled --> Reconfigure: Identity, route or supervision lost; native node error
+    Enabled --> Reconfigure: Identity, route or supervision lost, native node error
     Enabled --> Stopped: User disables, resources reaped
     state "Reconfiguration required" as Reconfigure
     state "Disabled" as Stopped
