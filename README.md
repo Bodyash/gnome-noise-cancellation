@@ -7,6 +7,8 @@
 A lightweight **GNOME 51 / PipeWire** extension that gives your apps a
 noise-suppressed **Clean Microphone**. CPU processing, local audio, no cloud.
 
+[▶ Watch the noise cancellation demo](noise-cancellation-demo.mp4)
+
 ```mermaid
 flowchart LR
     Mic["Your microphone"] --> DSP["Noise suppression<br/>RNNoise · SpeexDSP · WebRTC"]
