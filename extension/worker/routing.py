@@ -4,6 +4,7 @@ gi.require_version('Wp', '0.5')
 from gi.repository import GLib, GObject, Wp
 from lifecycle import STABLE
 from mixer import Mixer
+from handoff import DefaultHandoff, DefaultMetadata
 
 KEYS = STABLE + ['object.serial', 'device.api', 'device.id', 'media.class', 'node.name',
     'node.virtual', 'stream.monitor', 'application.name', 'application.process.binary',
@@ -21,6 +22,8 @@ class Registry:
         self._pending = 0
         self.link = None
         self.link_id = None
+        self.handoff = None
+        self._metadata_views = {}
         props = Wp.Properties.new_empty()
         props.set('application.name', 'Noise Cancellation supervisor')
         self.core = Wp.Core.new(None, None, props)
@@ -35,6 +38,13 @@ class Registry:
         self._signal(self.om, 'installed', self._installed)
         self._signal(self.core, 'disconnected', lambda *_: self._failure('PipeWire disconnected; select the microphone again.'))
         self.core.install_object_manager(self.om)
+        # Attach the metadata listener before requesting BOUND/DATA. The initial
+        # server replay can otherwise arrive before an object-added callback.
+        self._metadata_manager = Wp.ObjectManager.new()
+        self._metadata_manager.add_interest_full(Wp.ObjectInterest.new_type(Wp.Metadata.__gtype__))
+        self._signal(self._metadata_manager, 'object-added', self._metadata_added)
+        self._signal(self._metadata_manager, 'object-removed', self._metadata_removed)
+        self.core.install_object_manager(self._metadata_manager)
 
     def _signal(self, obj, name, callback):
         ident = GObject.Object.connect(obj, name, callback)
@@ -93,7 +103,10 @@ class Registry:
             def run():
                 self._pending = 0
                 if not self._closed:
-                    try: self.update(self.snapshot())
+                    try:
+                        snapshot = self.snapshot()
+                        self.update(snapshot)
+                        if self.handoff and not self._closed: self.handoff.poll(snapshot)
                     except Exception as error: self._failure('Cannot validate the current audio graph.', error)
                 return GLib.SOURCE_REMOVE
             self._pending = GLib.idle_add(run)
@@ -141,8 +154,52 @@ class Registry:
 
     def tick(self):
         if self._ready and not self._closed:
-            try: self.update(self.snapshot())
+            try:
+                snapshot = self.snapshot()
+                self.update(snapshot)
+                if self.handoff and not self._closed: self.handoff.poll(snapshot)
             except Exception as error: self._failure('Audio graph validation failed.', error)
+
+    def _default_metadata(self):
+        candidates = list(self._metadata_views.values())
+        return candidates[0] if len(candidates) == 1 and candidates[0].ready else None
+
+    def _metadata_added(self, _om, obj):
+        if (self._closed or obj.get_global_properties().get('metadata.name') != 'default' or
+                len(self._metadata_views) >= 32): return
+        view = self._metadata_views[obj] = DefaultMetadata(obj)
+        self._signal(obj, 'changed', lambda _obj, subject, key, kind, value:
+            view.update(subject, key, kind, value))
+        def activated(metadata, result, *_args):
+            if self._closed or self._metadata_views.get(metadata) is not view: return
+            try:
+                metadata.activate_finish(result)
+                view.ready = True
+                self.changed()
+            except Exception: pass  # Optional handoff remains unavailable; cleanup still works.
+        obj.activate(Wp.ProxyFeatures.PROXY_FEATURE_BOUND | Wp.MetadataFeatures.DATA, None, activated)
+
+    def _metadata_removed(self, _om, obj):
+        self._metadata_views.pop(obj, None)
+        remaining = []
+        for target, handler in self._signals:
+            if target == obj:
+                if GObject.Object.handler_is_connected(target, handler): GObject.Object.disconnect(target, handler)
+            else: remaining.append((target, handler))
+        self._signals = remaining
+
+    def begin_handoff(self, session, done):
+        if self._closed: done(False); return
+        def sync(callback):
+            def synced(core, result, *_args):
+                if self._closed: return
+                try: success = core.sync_finish(result)
+                except Exception: success = False
+                callback(success)
+            self.core.sync(None, synced)
+        self.handoff = DefaultHandoff(session.capture_id, session.handoff_source,
+            self._default_metadata, sync, done, output_id=session.output_id)
+        self.handoff.poll(self.snapshot())
 
     def _failure(self, message, error=None):
         if error is not None:
@@ -153,6 +210,7 @@ class Registry:
     def close(self):
         if self._closed: return
         self._closed = True
+        if self.handoff: self.handoff.close()
         if self._pending: GLib.source_remove(self._pending); self._pending = 0
         for obj, ident in self._signals:
             if GObject.Object.handler_is_connected(obj, ident): GObject.Object.disconnect(obj, ident)
@@ -163,4 +221,5 @@ class Registry:
             except Exception: pass  # connection teardown also releases the non-lingering link
             self.link = None
         self.core.disconnect()
+        self._metadata_views.clear()
         self._objects.clear(); self._ids.clear()

@@ -94,7 +94,7 @@ export class Controller {
     }
 
     // Share one cleanup result per session; retain pending reaping to block overlapping workers.
-    _stop(session = this._session) {
+    _stop(session = this._session, {handoff = false} = {}) {
         if (session === this._session) this._session = null;
         if (!session) return null;
         if (this._stoppedSessions.has(session)) return this._stoppedSessions.get(session);
@@ -104,7 +104,8 @@ export class Controller {
             this.selection = null;
         };
         try {
-            const result = session.stop({immediate: this._disposing || this._disposed});
+            const immediate = this._disposing || this._disposed;
+            const result = session.stop({immediate, handoff: handoff && !immediate});
             if (result && typeof result.then === 'function') {
                 const pending = Promise.resolve(result).catch(failed).then(() => {
                     this._closing.delete(pending);
@@ -324,11 +325,12 @@ export class Controller {
     // Tile-off keeps the microphone preference and waits for owned resource cleanup.
     disable() {
         if (this._disposed) return;
+        const handoff = this.state === State.ACTIVE && !this._reconfigure;
         const generation = ++this._generation;
         if (this.state === State.STARTING || this.state === State.ACTIVE || this._session)
             this._set(State.STOPPING, 'Stopping noise cancellation…');
         const tasks = [...this._closing];
-        const stopping = this._stop();
+        const stopping = this._stop(this._session, {handoff});
         if (stopping) tasks.push(stopping);
         if (this._preparing)
             tasks.push(this._preparing.then(session => this._stop(session), () => null));

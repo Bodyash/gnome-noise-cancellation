@@ -44,6 +44,8 @@ Do not claim RNNoise is packaged on every distro release.
 - `extension/worker/routing.py`: Wp 0.5 introspection, registry and owned exact link.
 - `extension/worker/mixer.py` and `volume.py`: session-scoped volume/mute proxy,
   distro mixer API, serialized physical writes and bounded acknowledgments.
+- `extension/worker/handoff.py`: bounded, explicit tile-off handoff of the current
+  default input; never change the configured default, output devices or BT profiles.
 - `extension/worker/streaming.py`: GStreamer capture/output and bounded filtered queue.
 - `extension/worker/dsp.py`: typed ctypes RNNoise API, 480-sample framing/scaling.
 - `extension/worker/engines.py`: RNNoise/SpeexDSP/WebRTC factory, strict config
@@ -123,7 +125,13 @@ Exclude virtual sources and monitors.
 
 Idle suspension is within the same explicitly enabled session, not hotplug recovery.
 Keep the virtual source registered under its stable node name with a per-session
-tag; do not change the system default. An active consumer link demands capture;
+tag. Never change the configured system default. The user-authorized exception is
+normal active tile-off: revoke delivery, release capture, then hand the effective
+default input from Clean Microphone to the still-validated selected physical mic
+before removing the virtual source. Preserve the configured Clean preference and
+skip handoff if another input is current/configured. Faults and extension unload
+must never initiate this handoff or delay immediate termination.
+An active consumer link demands capture;
 default metadata and corked/paused links do not. The independent output pipeline
 must negotiate/serve silence while capture sleeps. Coalesce PLAYING/PAUSED changes,
 gate delivery on idle, allow at most 200 ms for consumer gaps to settle before

@@ -37,6 +37,7 @@ class Worker:
         self.processing = None
         self.closed = False
         self.failed = False
+        self.stopping = False
         self.buffer = bytearray()
         self.started = self.last_control = self.last_tick = time.monotonic()
         self._watch_stop = threading.Event()
@@ -61,6 +62,9 @@ class Worker:
 
     def fault(self, message):
         if self.closed: return
+        if self.stopping:
+            self._terminate()
+            return
         if self.session: self.session.fault(message)
         else:
             self.failed = True
@@ -81,7 +85,7 @@ class Worker:
                 if len(line) > 16384 or b'\0' in line: raise ValueError('Invalid or excessive worker request.')
                 request = json.loads(line.decode('utf-8'), parse_constant=lambda _: (_ for _ in ()).throw(ValueError('Invalid JSON number')))
                 self.command(request)
-                if self.closed: return self.GLib.SOURCE_REMOVE
+                if self.closed or self.stopping: return self.GLib.SOURCE_REMOVE
             if len(self.buffer) > 16384: raise ValueError('Worker request exceeded its protocol bound.')
         except BlockingIOError:
             if condition & (self.GLib.IOCondition.HUP | self.GLib.IOCondition.ERR):
@@ -117,6 +121,17 @@ class Worker:
         elif command == 'publish':
             self.registry.tick()  # validate fresh registry data before publication
             self.session.publish()
+        elif command == 'stop':
+            if request.get('handoff') is not True or self.stopping:
+                raise ValueError('Invalid or repeated user stop request.')
+            self.stopping = True
+            self.driver.revoke()
+            # Freeze graph callbacks before expected capture/link removal.
+            self.session.closed = True
+            if self.session.active:
+                self.driver.stop_for_handoff(self.session, self._terminate)
+            else:
+                self._terminate()
         else: raise ValueError('Unknown, repeated or out-of-order worker command.')
         self.last_control = time.monotonic()
 
@@ -153,7 +168,8 @@ class Worker:
         if self.closed: return self.GLib.SOURCE_REMOVE
         self.closed = True
         if self.driver: self.driver.revoke()
-        if self.session: self.session.close()
+        if self.stopping and self.driver: self.driver.close()
+        elif self.session: self.session.close()
         elif self.driver: self.driver.close()
         self.loop.quit()
         return self.GLib.SOURCE_REMOVE

@@ -68,6 +68,16 @@ test('enable verifies processing before publishing and disabling cleans once', a
     c.disable(); c.disable();
     equal(c.state, State.DISABLED);
     equal(b.stopped, 1);
+    assert(b.stopOptions?.handoff, 'Normal active tile-off must request the default-input handoff');
+});
+test('faults and extension unload never request a default-input handoff', async () => {
+    const {controller: c, backend: b} = await configured();
+    await c.enable(); c.invalidate('Mic lost');
+    assert(!b.stopOptions?.handoff, 'Fault cleanup must not change the system input');
+    const other = await configured();
+    await other.controller.enable(); await other.controller.dispose();
+    assert(other.backend.stopOptions?.immediate && !other.backend.stopOptions?.handoff,
+        'Extension unload must terminate immediately without default changes');
 });
 for (const missing of ['PipeWire is missing', 'RNNoise runtime is missing']) {
     test(missing, async () => {

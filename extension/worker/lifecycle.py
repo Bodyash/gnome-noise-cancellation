@@ -284,6 +284,28 @@ class Session:
             'cookie': int(self.authorization.key[0]), 'processing': True, 'published': published,
             'rate': 48000, 'channels': 1, 'processedFrames': self.driver.frames, 'captureLinkId': self.link_id}
 
+    def handoff_source(self, snapshot):
+        """Read-only validation after capture removal, with output still owned/silent."""
+        if not self.active or self.output_id is None: return None
+        try:
+            objects = snapshot['objects']
+            indexed = {o['id']: o for o in objects}
+            if len(objects) > 4096 or len(indexed) != len(objects): return None
+            device_id = self.authorization.validate(snapshot)
+            wp = wireplumber(objects, self.authorization.key[4], self._wp)
+            if not self._wp or wp != self._wp: return None
+            output = self._own_node(objects, 'source')
+            if not output or output['id'] != self.output_id or output['props'].get('media.class') != 'Audio/Source':
+                return None
+            for ident in [self.authorization.source_id, device_id, self.output_id, *self._wp]:
+                if str(indexed[ident]['props'].get('object.serial')) != self._pins.get(ident): return None
+            name = self.authorization.key[3]
+            if sum(o['kind'] == 'Node' and o['props'].get('node.name') == name for o in objects) != 1:
+                return None
+            return name
+        except (KeyError, TypeError, ValueError):
+            return None
+
     def publish(self):
         if self.closed or not self.prepared or self.publishing:
             raise ValueError('Output publication requires a fresh prepared processing session.')

@@ -20,16 +20,19 @@ flowchart TB
     subgraph Worker["One Python worker per enabled session"]
         Supervisor["Identity, routing and graph lease"]
         Mixer["Session volume / mute binding"]
+        Handoff["Bounded tile-off input handoff"]
         Capture["GStreamer capture"] --> Engine["Selected noise suppression engine"]
         Engine --> Queue["Bounded filtered queue"] --> Output["GStreamer source"]
         Supervisor -.-> Capture
         Supervisor -.-> Output
         Supervisor -.-> Mixer
+        Supervisor -.-> Handoff
     end
     Mic["Authorized physical mic"] --> Capture
     Output --> Clean["PipeWire · Clean Microphone"] --> Apps["Applications"]
     Mic <-.->|"volume / mute"| Mixer
     Mixer <-.->|"volume / mute · unity audio gain"| Clean
+    Handoff -.->|"current input only · saved preference unchanged"| WP
     Settings --> Saved
     Saved -.-> Controller
     Controller -.->|"remember preferred mic"| Saved
@@ -54,6 +57,7 @@ show control and supervision; microphone samples never cross Shell IPC or GSetti
 | `worker/main.py`, `worker/lifecycle.py` | Protocol, watchdog and graph authorization |
 | `worker/routing.py` | WirePlumber registry monitoring and one exact owned link |
 | `worker/mixer.py`, `worker/volume.py` | Authorized volume/mute binding through the distro WirePlumber mixer API; bounded acknowledgment and feedback control |
+| `worker/handoff.py` | Conditional current-input handoff before source removal on explicit tile-off |
 | `worker/streaming.py` | Capture/output, idle transitions and delivery guards |
 | `worker/dsp.py`, `worker/engines.py` | RNNoise, SpeexDSP, WebRTC and filtered output level |
 
@@ -87,6 +91,16 @@ sequenceDiagram
     Worker-->>Shell: Active proof + virtual source identity
     Shell-->>User: Backend and activity on tile
     Note over Shell,Worker: Cancellation or stale generation stops the worker.<br/>Active is reported only after both proofs pass.
+    User->>Shell: Turn noise cancellation tile off
+    Shell->>Worker: Explicit stop with conditional input handoff
+    Worker->>Worker: Revoke processing; output serves silence
+    Worker->>Graph: Release owned capture stream
+    Graph-->>Worker: Capture node removed
+    Worker->>Graph: If Clean is current input, hand current default to validated physical mic
+    Graph-->>Worker: Metadata round trip acknowledged
+    Graph-->>Worker: Existing consumers leave Clean (within stop deadline)
+    Worker->>Graph: Remove Clean Microphone; close owned connections
+    Worker-->>Shell: Owned worker reaped
     User->>Shell: Disable extension
     Shell->>Worker: Gio.Subprocess.force_exit()
     Note over Shell,Worker: Cancel IPC and timers immediately.<br/>Retain only asynchronous child reaping.
@@ -181,7 +195,7 @@ same route and fresh processing are proven. Transitions have an eight-second lim
 Capture and output have independent pipelines. The virtual source stays registered
 as `noise_cancellation.clean_microphone` with a per-session ownership tag. Output
 uses a system clock and synchronized sink to serve paced silence while capture
-sleeps. The extension never changes the system default or hides privacy indicators;
+sleeps. The extension never changes the configured system default or hides privacy indicators;
 the indicator can linger during setup/resume and the idle settling window.
 
 Callbacks use zero-timeout sample pulls. A late `new-sample` callback after PAUSED
@@ -216,10 +230,32 @@ through startup, processing and teardown. After cleanup, only the latest valid
 saved snapshot applies; it never starts audio. The worker echoes canonical options
 with its readiness/activity proofs. Missing optional engines are checked independently.
 
-Normal tile-off revokes first, requests graceful worker termination, and escalates
-to forced termination after 750 ms if needed. The controller stays STOPPING until
-the child is reaped. In the worker, normal cleanup stops pipelines before freeing
-DSP state and disconnects registry callbacks and owned links.
+Normal active tile-off sends a bounded private `stop` request with handoff intent.
+The worker immediately revokes processing and gates delivery, retaining the owned
+virtual source to serve silence. A teardown thread releases capture; the control
+loop observes its node removal before revalidating the physical identity, original
+WirePlumber providers and owned virtual source. If Clean Microphone is still the
+effective input and no different configured input is pending, it sets only
+`default.audio.source` to the selected physical mic, waits for a server round
+trip and allows existing consumer links to leave before removing Clean Microphone.
+The worker observes policy-owned links without modifying them. This avoids leaving default-following apps
+with a missing input while the session manager chooses a fallback, which can
+temporarily open a Bluetooth headset mic and trigger call mode.
+
+`default.configured.audio.source` is preserved, so the desktop can select Clean
+Microphone again on the next explicit enable as before. Output defaults, Bluetooth
+profiles and user configuration files are untouched. A changed/missing/ambiguous
+identity or metadata, a different user selection, failed write, or 400 ms handoff
+deadline skips/ends the handoff and continues cleanup. The metadata reader caches
+only the two input-default keys from Wp signals; it avoids unsafe/unusable Wp 0.5
+Python metadata getter/iterator annotations. Native capture teardown stays off the
+control thread, and late handoff callbacks are cancelled on close.
+
+The existing 750 ms parent escalation deadline covers the entire stop, including
+handoff and native teardown. Faults, lost supervision, startup cancellation and
+extension unload use direct termination without handoff. The controller stays
+STOPPING until the child is reaped. Cleanup stops pipelines before freeing DSP
+state and disconnects registry callbacks and owned links.
 
 GNOME extension `disable()` uses **immediate termination** through the owned
 `Gio.Subprocess.force_exit()`, including during startup or an existing graceful

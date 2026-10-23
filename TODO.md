@@ -2,6 +2,9 @@
 
 ## Next patch release
 
+- [ ] Retest OBS using system default with Bluetooth headphones: repeated tile-off
+      must return to USB without a call-profile/noise-suppression interruption;
+      tile-on must preserve the existing automatic Clean selection.
 - [ ] Smoke-test shared volume/mute on GNOME 51: start at 50%, set Clean Microphone
       to 80%, edit the physical mic directly, test zero/mute, idle/resume and disable.
       Check other physical-mic consumers and hardware mixer rounding.

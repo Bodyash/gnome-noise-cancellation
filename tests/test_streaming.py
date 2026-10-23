@@ -4,6 +4,7 @@ import json
 import math
 import os
 from pathlib import Path
+from types import SimpleNamespace
 import sys
 import time
 import threading
@@ -19,6 +20,61 @@ from volume import Volume
 
 
 class StreamingTests(unittest.TestCase):
+    def test_handoff_revokes_and_releases_capture_while_output_remains_silent(self):
+        calls, pending, delivered = [], [], []
+        driver = AudioDriver(lambda _: None, lambda: None)
+        class Pipeline:
+            def __init__(self, name): self.name = name
+            def set_state(self, state):
+                self.revoked = driver.processor.revoked
+                calls.append((self.name, state))
+                return Gst.StateChangeReturn.SUCCESS
+        class App:
+            def get_property(self, _name): return 0
+            def emit(self, _name, buffer):
+                delivered.append(buffer.extract_dup(0, buffer.get_size()))
+                return Gst.FlowReturn.OK
+        driver.capture, driver.output = Pipeline('capture'), Pipeline('output')
+        driver.registry = SimpleNamespace(begin_handoff=lambda session, done: pending.append(done), close=lambda: None)
+        try:
+            driver.renew()
+            driver._queue.append(array.array('f', [0.25] * 480).tobytes())
+            driver._need_data(App(), 1920)
+            self.assertNotEqual(delivered[-1], bytes(1920))
+            driver._queue.append(array.array('f', [0.25] * 480).tobytes())
+            driver.stop_for_handoff(object(), driver.close)
+            self.assertTrue(driver.processor.revoked)
+            deadline = time.monotonic() + 0.5
+            while not pending and time.monotonic() < deadline:
+                GLib.MainContext.default().iteration(False)
+                time.sleep(0.002)
+            self.assertTrue(pending)
+            self.assertEqual(calls, [('capture', Gst.State.NULL)])
+            self.assertTrue(driver.capture.revoked)
+            driver._need_data(App(), 1920)
+            self.assertEqual(delivered[-1], bytes(1920))
+            pending[0](True)
+            self.assertIn(('output', Gst.State.NULL), calls)
+        finally: driver.close()
+
+    def test_handoff_native_failure_still_reaps_and_late_callback_cannot_run(self):
+        driver = AudioDriver(lambda _: None, lambda: None)
+        done = []
+        class BrokenCapture:
+            def set_state(self, _state): raise RuntimeError('native stop failed')
+        driver.capture = BrokenCapture()
+        try:
+            driver.stop_for_handoff(object(), lambda: done.append(True))
+            deadline = time.monotonic() + 0.5
+            while not done and time.monotonic() < deadline:
+                GLib.MainContext.default().iteration(False)
+                time.sleep(0.002)
+            self.assertEqual(done, [True])
+            driver.capture = None
+        finally:
+            driver.capture = None
+            driver.close()
+
     def test_clean_volume_is_initialized_and_audio_gain_stays_unity(self):
         output, _app, target = make_output('test', Volume((0.125, 0.0625), True))
         try:

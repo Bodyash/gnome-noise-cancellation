@@ -127,6 +127,22 @@ class WorkerTests(unittest.TestCase):
         self.assertTrue(self.session.closed)
         self.assertEqual(len(self.driver.volume_calls), count)
 
+    def test_default_handoff_requires_original_source_provider_and_owned_output(self):
+        self.published()
+        self.assertEqual(self.session.handoff_source(self.snapshot), 'alsa_input.usb')
+        for ident, prop, replacement in [(42, 'object.serial', '999'), (30, 'device.serial', 'other'),
+                (50, 'object.serial', '999'), (90, 'noise-cancellation.session', 'other')]:
+            with self.subTest(ident=ident, prop=prop):
+                changed = copy.deepcopy(self.snapshot)
+                next(o for o in changed['objects'] if o['id'] == ident)['props'][prop] = replacement
+                self.assertIsNone(self.session.handoff_source(changed))
+        # Expected capture removal is allowed only for this read-only stop decision.
+        snapshot = copy.deepcopy(self.snapshot)
+        snapshot['objects'] = [o for o in snapshot['objects'] if o['id'] not in (71, 72, 80)]
+        self.assertEqual(self.session.handoff_source(snapshot), 'alsa_input.usb')
+        snapshot['objects'].append({'id': 99, 'kind': 'Node', 'props': {'node.name': 'alsa_input.usb'}})
+        self.assertIsNone(self.session.handoff_source(snapshot))
+
     def test_processed_frame_count_alone_cannot_prove_fresh_resume_audio(self):
         self.published()
         self.consumer()

@@ -26,6 +26,12 @@ Earlier intermittent RNNoise silence and suspension reports have not recurred in
 the user's latest report. Their exact desktop causes were not independently
 reproduced; retain the regressions and routing diagnostic if they recur.
 
+The user confirmed shared volume works and reported a brief Bluetooth call-profile
+switch on normal tile-off while OBS follows the system default. Final selection
+already returned to USB and restored Clean on the next enable. The conditional
+handoff preserves that behavior and addresses the missing-default interval;
+the actual headset symptom has not been independently reproduced or retested.
+
 ## Local environment
 
 Arch Linux with GNOME Shell 51.1, GJS 1.90.1, PipeWire 1.6.9, WirePlumber 0.5.18,
@@ -38,10 +44,11 @@ Node.js and a Mermaid renderer are not installed.
 
 | Check | Result / scope |
 | --- | --- |
-| JavaScript | 159 cases: lifecycle, processes, dependencies, protocol, discovery, preferences, settings, rapid changes, presentation and diagnostics |
-| Python | 99 unittest methods plus table-driven scenarios: DSP, streaming, worker protocol, identity/routing, volume/mute, cleanup, headless runner and analysis gate |
+| JavaScript | 163 cases: lifecycle, processes, dependencies, protocol, discovery, preferences, settings, rapid changes, presentation and diagnostics |
+| Python | 114 unittest methods plus table-driven scenarios: DSP, streaming, worker protocol, identity/routing, volume/mute, input handoff, cleanup, headless runner and analysis gate |
 | Native synthetic audio | RNNoise, SpeexDSP and WebRTC produce nonzero downstream samples before and after idle; idle output is silent |
 | Isolated native volume | Opt-in private PipeWire server: starts at 50%, virtual 80% updates a synthetic source, physical edits/mute mirror back, actual nonzero downstream samples retain unity virtual gain |
+| Isolated native handoff | Real default metadata acknowledges physical input before virtual-source removal; configured Clean preference is preserved; no hardware or Bluetooth policy runs |
 | Conversion | Synthetic GStreamer 44.1 → 48 kHz followed by real RNNoise |
 | Runtime self-check | All three installed engines ready; capture/output constructed in NULL and registry ABI checked without server connection |
 | Static APIs | 10 Shell imports checked against installed GNOME 51 resources; GTK4/libadwaita properties/methods checked via introspection |
@@ -108,7 +115,17 @@ Its source, consumer and known output signal are synthetic; no desktop server or
 physical device was accessed. The installed PipeWire GStreamer plugin emitted one
 `gst_caps_is_equal` negotiation assertion while the sample/volume/mute checks
 passed. This fixture verifies adapter gain behavior and mixer API integration,
-not hardware or GNOME slider behavior. No extension was installed or enabled.
+not hardware or GNOME slider behavior. The same private-server fixture now also
+checks default metadata handoff and source-removal ordering. No extension was
+installed or enabled.
+
+Handoff regressions cover scoped explicit stop IPC, capture removal, effective
+versus configured defaults, malformed/missing metadata, source/provider/output
+replacement, duplicate source names, user changes during the server round trip,
+write/sync failures, bounded timeout, cancellation and late callbacks. Teardown
+tests keep output silent while it remains registered. Fault and unload paths never
+request handoff; immediate unload cancels pending handoff IPC and force-terminates
+the worker, and an unresponsive handoff hits the original stop deadline.
 
 The settings stress test runs six sessions with 360 pending edits and repeated
 enable/disable requests during delayed startup/teardown. It requires at most one
@@ -133,6 +150,10 @@ are tested with fake graphs and redact serials/session tags.
 - Shared volume/mute needs desktop testing with the actual GNOME controls and
   physical mixer, including hardware rounding and idle/resume. The existing desktop
   report predates this change.
+- OBS default-input handoff needs a desktop retest with the user's Bluetooth
+  headset, including unchanged call/media profile and headset noise suppression
+  through repeated tile toggles. The isolated fixture verifies metadata ordering,
+  not WirePlumber Bluetooth policy or headset firmware behavior.
 - Fedora and Debian/Ubuntu package names have documented sources; dependency
   installation and desktop operation have not been validated on those distributions.
 - Python worker acceptance by extensions.gnome.org remains unconfirmed.

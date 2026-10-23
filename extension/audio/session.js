@@ -250,23 +250,27 @@ export class AudioSession {
         } catch { this._done.reject(new Error('Cannot terminate owned audio worker')); }
     }
 
-    stop({immediate = false} = {}) {
+    stop({immediate = false, handoff = false} = {}) {
         if (!this._expectedStop) {
             this._expectedStop = true;
             this._prepared.reject(new Error('Audio session stopped'));
             this._active?.reject(new Error('Audio session stopped'));
             if (this._timer) { GLib.source_remove(this._timer); this._timer = 0; }
-            this._cancellable.cancel();
+            const gracefulHandoff = handoff && !immediate && this._phase === 'active' && !this._faulted;
+            if (!gracefulHandoff) this._cancellable.cancel();
             if (!this.exited && !immediate) {
-                try { this._child.send_signal(15); } catch { /* Exit notification may already be queued. */ }
+                if (gracefulHandoff)
+                    this._requestHandoffStop();
+                else this._signalStop();
                 this._killTimer = GLib.timeout_add(GLib.PRIORITY_DEFAULT, this._stopTimeoutMs, () => {
                     this._killTimer = 0;
                     this._forceExit();
                     return GLib.SOURCE_REMOVE;
                 });
             }
-            // EOF also revokes a worker whose parent stops writing.
-            try { this._stdin.close(null); } catch { /* An async write may still own the stream. */ }
+            if (immediate) {
+                try { this._stdin.close(null); } catch { /* A cancelled write may still own the stream. */ }
+            }
         }
         if (immediate) {
             // GNOME does not await Extension.disable(). Do not leave a grace
@@ -279,10 +283,38 @@ export class AudioSession {
         return this._done.promise;
     }
 
+    _signalStop() {
+        try { this._child.send_signal(15); } catch { /* Exit notification may already be queued. */ }
+        // EOF also revokes a worker whose parent stops writing.
+        try { this._stdin.close(null); } catch { /* A cancelled write may still own the stream. */ }
+    }
+
+    _requestHandoffStop() {
+        const bytes = new TextEncoder().encode(JSON.stringify({protocol: 1, session: this._token,
+            command: 'stop', handoff: true}) + '\n');
+        this._stopCancellable = new Gio.Cancellable();
+        // Finish any already-started bounded message before the final user stop;
+        // cancellation must not leave a partial JSON line ahead of it. The same
+        // parent stop deadline still bounds a stuck write and the entire handoff.
+        void this._writes.then(() => {
+            if (this.exited || this._forcedExit || this._stopCancellable.is_cancelled()) return;
+            this._cancellable.cancel();
+            this._stdin.write_all_async(bytes, GLib.PRIORITY_DEFAULT, this._stopCancellable, (stream, result) => {
+                try {
+                    const [success, count] = stream.write_all_finish(result);
+                    if (!success || count !== bytes.length) throw new Error('Incomplete stop request');
+                } catch {
+                    if (!this.exited && !this._forcedExit) this._signalStop();
+                }
+            });
+        }).catch(() => { if (!this.exited && !this._forcedExit) this._signalStop(); });
+    }
+
     _cleanup() {
         if (this._timer) { GLib.source_remove(this._timer); this._timer = 0; }
         if (this._killTimer) { GLib.source_remove(this._killTimer); this._killTimer = 0; }
         this._cancellable.cancel();
+        this._stopCancellable?.cancel();
         for (const stream of [this._stdin, this._stdout, this._stderr]) {
             try { stream.close(null); } catch { /* Already closed or completing cancellation. */ }
         }

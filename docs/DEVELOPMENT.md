@@ -70,6 +70,14 @@ server removes its non-lingering objects asynchronously. Re-enable cannot start
 audio before prior child reaping finishes. Screen lock uses this same path when
 GNOME calls `disable()` in the default user session mode.
 
+Normal tile-off has a separate bounded input handoff: if Clean Microphone is the
+current system input, it returns the effective default to the still-validated
+selected physical microphone before removing Clean Microphone. The saved default
+preference stays unchanged, preserving desktop selection on the next enable.
+This prevents a missing-default interval in apps such as OBS using **Default**.
+It changes no Bluetooth profiles or output devices and leaves other user input
+choices alone. Fault/unplug cleanup and extension unload skip this convenience.
+
 ### Temporary testing
 
 There is no universal load-a-ZIP-for-one-session command. A nested GNOME 51 session
@@ -147,7 +155,10 @@ stay under `build/`. It loads no hardware or WirePlumber policy and never connec
 to the desktop graph. It uses existing runtimes and needs permission to bind a
 private Unix socket; report a blocked socket rather than using the desktop server.
 Checks cover initial volume, changes in both directions, mute, and actual nonzero
-samples proving that the virtual adapter does not apply gain twice. The fixture
+samples proving that the virtual adapter does not apply gain twice. Native metadata
+checks also require capture removal before effective-default handoff and its
+acknowledgment before virtual-source removal, preserving the configured preference.
+No real Bluetooth profile/policy behavior is exercised. The fixture
 injects a known test signal at the filtered output boundary; regular headless
 tests exercise the real DSP engines separately. Desktop GNOME sliders, hardware
 mixer rounding and other distributions still require manual testing.

@@ -68,5 +68,8 @@ for line in sys.stdin:
                    'processing': ticks == 3, 'resumeBaseline': 1,
                    'processedFrames': 1 if ticks == 2 else 2})
         reply({"protocol": 1, "session": message["session"], "event": "pong"})
+    elif command == 'stop' and scenario == 'handoff-stop':
+        if message.get('handoff') is not True or not published: raise SystemExit(4)
+        raise SystemExit(0)
 if scenario == "ignore-stop":
     time.sleep(10)

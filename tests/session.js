@@ -24,6 +24,25 @@ function create(scenario, faults = [], activities = [], processing = {}, options
         });
 }
 let cases = 0;
+{
+    const signals = [];
+    const s = create('handoff-stop', [], [], {}, {spawn: () => {
+        const child = Gio.Subprocess.new([python, 'tests/fixtures/fake-helper.py', 'handoff-stop'],
+            Gio.SubprocessFlags.STDIN_PIPE | Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE);
+        return {get_stdin_pipe: () => child.get_stdin_pipe(),
+            get_stdout_pipe: () => child.get_stdout_pipe(), get_stderr_pipe: () => child.get_stderr_pipe(),
+            wait_async: (...args) => child.wait_async(...args),
+            send_signal(sig) { signals.push(sig); child.send_signal(sig); },
+            force_exit() { signals.push('force'); child.force_exit(); }};
+    }});
+    try {
+        await s.verify(); await s.publish();
+        await s.stop({handoff: true});
+        assert(s.exited && signals.length === 0,
+            'Tile-off must send the explicit handoff request and allow its bounded completion before signals/EOF');
+        print('ok - tile-off requests a scoped handoff over IPC before process cleanup'); cases++;
+    } finally { await s.stop({immediate: true}); }
+}
 function trackedSession(faults = [], activities = []) {
     const signals = [];
     const session = create('ignore-stop', faults, activities, {}, {spawn: () => {
@@ -36,6 +55,35 @@ function trackedSession(faults = [], activities = []) {
             force_exit() { signals.push('force'); child.force_exit(); }};
     }});
     return {session, signals};
+}
+{
+    const {session: s, signals} = trackedSession();
+    try {
+        await s.verify(); await s.publish();
+        let finishWrite;
+        s._writes = new Promise(resolve => { finishWrite = resolve; });
+        const stopping = s.stop({handoff: true});
+        assert(s._killTimer && s._stopCancellable, 'Handoff needs bounded, cancellable final IPC');
+        assert(!s._cancellable.is_cancelled(), 'Handoff truncated an already-started control message');
+        const unloaded = s.stop({immediate: true});
+        assert(unloaded === stopping && !s._killTimer && s._stopCancellable.is_cancelled(),
+            'Unload left handoff work/timers running');
+        finishWrite();
+        await unloaded;
+        assert(s.exited && JSON.stringify(signals) === '["force"]',
+            'Unload must immediately terminate a pending handoff');
+        print('ok - unload cancels a pending default-input handoff and reaps immediately'); cases++;
+    } finally { await s.stop({immediate: true}); }
+}
+{
+    const {session: s, signals} = trackedSession();
+    try {
+        await s.verify(); await s.publish();
+        await s.stop({handoff: true});
+        assert(s.exited && JSON.stringify(signals) === '["force"]',
+            'An ignored handoff must hit the original stop deadline and be reaped');
+        print('ok - unresponsive handoff remains bounded by the normal stop deadline'); cases++;
+    } finally { await s.stop({immediate: true}); }
 }
 {
     const faults = [], activities = [];

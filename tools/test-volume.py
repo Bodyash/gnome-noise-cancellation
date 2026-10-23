@@ -14,6 +14,7 @@ import sys
 import tempfile
 import threading
 import time
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG = '''
@@ -26,9 +27,11 @@ context.modules = [
     { name = libpipewire-module-client-node }
     { name = libpipewire-module-adapter }
     { name = libpipewire-module-link-factory }
+    { name = libpipewire-module-metadata }
 ]
 context.objects = [
     { factory = spa-node-factory args = { factory.name = support.node.driver node.name = Driver } }
+    { factory = metadata args = { metadata.name = default } }
 ]
 '''
 CLIENT_CONFIG = '''
@@ -38,6 +41,7 @@ context.modules = [
     { name = libpipewire-module-protocol-native }
     { name = libpipewire-module-client-node }
     { name = libpipewire-module-adapter }
+    { name = libpipewire-module-metadata }
 ]
 '''
 
@@ -159,7 +163,35 @@ def probe():
             abs(registry.mixer.read(clean_id).channels[0] - 0.027) < 1e-5), 'Physical volume/mute did not mirror.')
         amplitude()  # drain already queued audio after mute
         assert amplitude() == 0, 'Muted virtual source delivered nonzero audio.'
-        print('Private native volume test passed: 50% initialization, 80% source control, unity output gain, mute.')
+        # A synthetic default-input policy: test real metadata acknowledgment and
+        # native node-removal ordering, without running desktop/Bluetooth policy.
+        from handoff import CURRENT, CONFIGURED, default_name
+        wait(lambda: registry._default_metadata() is not None, 'Private default metadata did not appear.')
+        metadata = registry._default_metadata()
+        clean_name = 'noise_cancellation.clean_microphone'
+        metadata.set(0, CONFIGURED, 'Spa:String:JSON', '{"name":"' + clean_name + '"}')
+        metadata.set(0, CURRENT, 'Spa:String:JSON', '{"name":"' + clean_name + '"}')
+        wait(lambda: default_name(metadata, CURRENT) == clean_name, 'Private default input was not set.')
+        observer = Registry('handoff-observer', lambda _: None, lambda _: None, faults.append)
+        try:
+            observer.start()
+            wait(lambda: observer._default_metadata() is not None, 'Initial metadata replay did not finish.')
+            assert default_name(observer._default_metadata(), CURRENT) == clean_name
+            assert default_name(observer._default_metadata(), CONFIGURED) == clean_name
+        finally: observer.close()
+        capture_id = node('noise_cancellation.volume-probe.capture')['id']
+        capture.set_state(Gst.State.NULL)
+        completed = []
+        registry.begin_handoff(SimpleNamespace(capture_id=capture_id, output_id=clean_id,
+            handoff_source=lambda _snapshot: 'volume_probe.physical'), completed.append)
+        wait(lambda: (registry.tick(), bool(completed))[1], 'Native handoff timed out.')
+        assert completed == [True], 'Current default did not acknowledge the selected source.'
+        assert node(clean_name), 'Clean source vanished before the handoff acknowledgment.'
+        assert default_name(metadata, CURRENT) == 'volume_probe.physical'
+        assert default_name(metadata, CONFIGURED) == clean_name, 'Saved Clean preference was changed.'
+        output.set_state(Gst.State.NULL)
+        wait(lambda: node(clean_name) is None, 'Clean source did not disappear after the handoff.')
+        print('Private native test passed: volume/mute, unity output gain and default-input handoff before source removal.')
     finally:
         registry.close()
         for pipeline in reversed(pipelines): pipeline.set_state(Gst.State.NULL)
@@ -185,6 +217,7 @@ def main():
             'PIPEWIRE_CONFIG_NAME': 'client.conf', 'XDG_CONFIG_HOME': directory,
             'GST_REGISTRY': str(ROOT / 'build/gst-registry.bin'), 'PYTHONDONTWRITEBYTECODE': '1',
             'DBUS_SESSION_BUS_ADDRESS': f'unix:path={root}/no-bus',
+            'DISPLAY': '', 'WAYLAND_DISPLAY': '',
             'NOISE_CANCELLATION_PRIVATE_VOLUME_TEST': '1'}
         with (root / 'server.log').open('w+') as log:
             daemon = subprocess.Popen([program, '-c', 'private.conf'],

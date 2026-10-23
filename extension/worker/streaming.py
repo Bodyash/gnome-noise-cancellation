@@ -152,6 +152,7 @@ class AudioDriver:
         self._delivery = True
         self._delivery_generation = 0
         self._first_sample = True
+        self._handoff_started = False
 
     @property
     def frames(self): return self.processor.frames
@@ -411,6 +412,34 @@ class AudioDriver:
     def revoke(self):
         self.processor.revoke()
         self._switch_changed.set()
+
+    def stop_for_handoff(self, session, done):
+        if self._handoff_started or self._stopped.is_set(): return
+        self._handoff_started = True
+        self.revoke()
+        self.set_delivery(False)
+        self.stage = 'releasing capture before default-input handoff'
+        def complete():
+            if not self._stopped.is_set():
+                try: self.registry.begin_handoff(session, lambda _success: done())
+                except Exception: done()
+            return GLib.SOURCE_REMOVE
+        def run():
+            callback = complete
+            try:
+                previous = self._capture_thread
+                if previous:
+                    previous.join(0.1)
+                    if previous.is_alive(): raise RuntimeError('Capture transition still pending.')
+                if self.capture: self.capture.set_state(Gst.State.NULL)
+            except Exception:
+                callback = lambda: (done(), GLib.SOURCE_REMOVE)[1] if not self._stopped.is_set() else GLib.SOURCE_REMOVE
+            finally:
+                GLib.idle_add(callback)
+                self._transitions.discard(threading.current_thread())
+        thread = threading.Thread(target=run, name='audio-stop-handoff', daemon=True)
+        self._transitions.add(thread)
+        thread.start()
 
     def close(self):
         if self._stopped.is_set(): return

@@ -19,6 +19,7 @@ Select a physical microphone and enable it from Quick Settings. Choose
 
 - Physical capture sleeps when no app needs it; the virtual microphone stays available.
 - Clean Microphone shares the selected microphone's volume and mute controls.
+- Turning it off hands the current system input back to the selected mic when needed.
 - Remembers your preferred microphone across login. Processing always starts disabled.
 - Shows the current backend and activity. Settings open in GNOME's preferences window.
 - Device loss stops the session and requires explicit selection again. No automatic fallback.
