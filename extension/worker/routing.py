@@ -3,6 +3,7 @@ import gi
 gi.require_version('Wp', '0.5')
 from gi.repository import GLib, GObject, Wp
 from lifecycle import STABLE
+from mixer import Mixer
 
 KEYS = STABLE + ['object.serial', 'device.api', 'device.id', 'media.class', 'node.name',
     'node.virtual', 'stream.monitor', 'application.name', 'application.process.binary',
@@ -23,6 +24,7 @@ class Registry:
         props = Wp.Properties.new_empty()
         props.set('application.name', 'Noise Cancellation supervisor')
         self.core = Wp.Core.new(None, None, props)
+        self.mixer = Mixer(self.core, self.changed, self._failure, self._signal)
         self.om = Wp.ObjectManager.new()
         for cls in [Wp.Node, Wp.Device, Wp.Client, Wp.Port, Wp.Link]:
             self.om.add_interest_full(Wp.ObjectInterest.new_type(cls.__gtype__))
@@ -43,7 +45,9 @@ class Registry:
 
     def _connected(self, core, result, *_args):
         if self._closed: return
-        try: core.activate_finish(result)
+        try:
+            core.activate_finish(result)
+            self.mixer.start()
         except Exception as error: self._failure('Cannot connect to the user PipeWire server.', error)
 
     # A server round trip avoids treating the initial partial registry as a complete graph.
@@ -153,6 +157,7 @@ class Registry:
         for obj, ident in self._signals:
             if GObject.Object.handler_is_connected(obj, ident): GObject.Object.disconnect(obj, ident)
         self._signals.clear()
+        self.mixer.close()
         if self.link:
             try: self.link.request_destroy()
             except Exception: pass  # connection teardown also releases the non-lingering link

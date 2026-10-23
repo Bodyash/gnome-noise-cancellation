@@ -13,6 +13,14 @@ cleaned up, the latest saved choices apply to the next explicit enable.
 Settings never authorize a microphone, restart processing or clear an invalidation.
 All engines use the same supervised capture, idle, routing and cleanup path.
 
+The desktop **Clean Microphone** volume slider changes the selected physical
+microphone's volume immediately while enabled. Initial volume and mute come from
+that microphone, and direct physical volume/mute edits update Clean Microphone too.
+This also works while capture is idle. It affects other apps using the same physical
+microphone; disabling processing leaves its last requested volume in place.
+Volume is applied once at the physical source. The saved **Output level** below is
+a separate adjustment to filtered audio and still requires disable/enable to change.
+
 ## Controls
 
 | Engine | Option | Default / meaning |

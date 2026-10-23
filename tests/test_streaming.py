@@ -1,5 +1,6 @@
 """Real GStreamer synthetic tests, no PipeWire server or physical input."""
 import array
+import json
 import math
 import os
 from pathlib import Path
@@ -14,9 +15,21 @@ os.environ['GST_REGISTRY'] = str(ROOT / 'build/gst-registry.bin')
 sys.path.insert(0, str(ROOT / 'extension/worker'))
 from streaming import AudioDriver, check_runtime, make_capture, make_output, configure_output, Gst, GLib
 from dsp import Processor
+from volume import Volume
 
 
 class StreamingTests(unittest.TestCase):
+    def test_clean_volume_is_initialized_and_audio_gain_stays_unity(self):
+        output, _app, target = make_output('test', Volume((0.125, 0.0625), True))
+        try:
+            props = target.get_property('stream-properties')
+            self.assertEqual(props.get_value('channelmix.min-volume'), '1.0')
+            self.assertEqual(props.get_value('channelmix.max-volume'), '1.0')
+            self.assertEqual(props.get_value('state.restore-props'), 'false')
+            initial = json.loads(props.get_value('node.param.Props'))
+            self.assertEqual(initial, {'channelVolumes': [0.125], 'mute': True})
+        finally: output.set_state(Gst.State.NULL)
+
     def test_brief_consumer_churn_does_not_pause_and_restart_native_capture(self):
         states = []
         paused = threading.Event()

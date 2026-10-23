@@ -38,6 +38,11 @@ class FakeDriver:
         self.capture_idle = False
         self.fresh_capture = True  # Fake frame updates complete synchronously.
         self.resume_baseline = 0
+        self.volume_ready = True
+        self.volume_calls = []
+    def sync_volume(self, source, output=None):
+        self.volume_calls.append((source, output))
+        return self.volume_ready
     def start_capture(self, authorization, token): self.calls.append('capture')
     def create_link(self, source, capture): self.calls.append(('link', source, capture))
     def start_output(self, token): self.calls.append('output')
@@ -93,6 +98,34 @@ class WorkerTests(unittest.TestCase):
                 'object.serial': str(ident + 600), 'link.output.node': '90',
                 'link.input.node': str(ident)}},
         ])
+
+    def test_volume_readiness_gates_capture_and_publication(self):
+        self.driver.volume_ready = False
+        self.session.update(self.snapshot)
+        self.assertNotIn('capture', self.driver.calls)
+        self.driver.volume_ready = True
+        self.route()
+        self.session.publish()
+        self.snapshot['objects'].append({'id': 90, 'kind': 'Node', 'props': {
+            'object.serial': '305', 'node.name': 'noise_cancellation.clean_microphone',
+            'noise-cancellation.session': 'test', 'client.id': '70', 'media.class': 'Audio/Source'}})
+        self.driver.volume_ready = False
+        self.session.update(self.snapshot)
+        self.assertFalse(self.session.active)
+        self.assertFalse(self.driver.delivery)
+        self.driver.volume_ready = True
+        self.session.update(self.snapshot)
+        self.assertTrue(self.session.active)
+        self.assertEqual(self.driver.volume_calls[-1], (42, 90))
+
+    def test_volume_updates_stop_before_identity_loss_or_after_close(self):
+        self.published()
+        count = len(self.driver.volume_calls)
+        self.snapshot['objects'][1]['props']['object.serial'] = '999'
+        self.session.update(self.snapshot)
+        self.session.update(self.snapshot)
+        self.assertTrue(self.session.closed)
+        self.assertEqual(len(self.driver.volume_calls), count)
 
     def test_processed_frame_count_alone_cannot_prove_fresh_resume_audio(self):
         self.published()

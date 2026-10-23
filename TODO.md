@@ -1,14 +1,13 @@
 # Release checklist and roadmap
 
-## First GitHub release
+## Next patch release
 
-- [ ] Push the source and workflow to the public GitHub repository with Issues enabled.
+- [ ] Smoke-test shared volume/mute on GNOME 51: start at 50%, set Clean Microphone
+      to 80%, edit the physical mic directly, test zero/mute, idle/resume and disable.
+      Check other physical-mic consumers and hardware mixer rounding.
 - [ ] Run Actions manually; resolve test, packaging and Shexli findings.
-      The first run reached Shexli; rerun after the logging/signal fixes and the
-      documented, ZIP-checked Shell 51 analyzer compatibility exception.
-- [ ] Smoke-test the packaged public UUID on GNOME 51: each backend, idle/resume,
-      rapid toggles and extension disable. Disable the old development UUID first.
-- [ ] Push `v1.0.0` after checks pass; confirm the Release ZIP and checksum download.
+- [ ] Tag the patch after checks and desktop testing pass; confirm its Release ZIP
+      and checksum download.
 
 ## GNOME Extensions listing
 

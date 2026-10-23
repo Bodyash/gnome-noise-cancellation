@@ -19,13 +19,17 @@ flowchart TB
     end
     subgraph Worker["One Python worker per enabled session"]
         Supervisor["Identity, routing and graph lease"]
+        Mixer["Session volume / mute binding"]
         Capture["GStreamer capture"] --> Engine["Selected noise suppression engine"]
         Engine --> Queue["Bounded filtered queue"] --> Output["GStreamer source"]
         Supervisor -.-> Capture
         Supervisor -.-> Output
+        Supervisor -.-> Mixer
     end
     Mic["Authorized physical mic"] --> Capture
     Output --> Clean["PipeWire · Clean Microphone"] --> Apps["Applications"]
+    Mic <-.->|"volume / mute"| Mixer
+    Mixer <-.->|"volume / mute · unity audio gain"| Clean
     Settings --> Saved
     Saved -.-> Controller
     Controller -.->|"remember preferred mic"| Saved
@@ -49,6 +53,7 @@ show control and supervision; microphone samples never cross Shell IPC or GSetti
 | `audio/session.js` | Private IPC, readiness proofs, heartbeat and child reaping |
 | `worker/main.py`, `worker/lifecycle.py` | Protocol, watchdog and graph authorization |
 | `worker/routing.py` | WirePlumber registry monitoring and one exact owned link |
+| `worker/mixer.py`, `worker/volume.py` | Authorized volume/mute binding through the distro WirePlumber mixer API; bounded acknowledgment and feedback control |
 | `worker/streaming.py` | Capture/output, idle transitions and delivery guards |
 | `worker/dsp.py`, `worker/engines.py` | RNNoise, SpeexDSP, WebRTC and filtered output level |
 
@@ -68,6 +73,7 @@ sequenceDiagram
     User->>Shell: Select physical mic, Enable
     Shell->>Shell: Check dependencies and fresh device identity
     Shell->>Worker: Prepare(session token, identity, frozen options)
+    Worker->>Graph: Read selected microphone volume and mute
     Worker->>Graph: Capture with autoconnect disabled
     Worker->>Graph: Create exact physical-port link
     Graph-->>Worker: Pinned identity and unique active route
@@ -75,6 +81,8 @@ sequenceDiagram
     Worker-->>Shell: Prepared proof + canonical options
     Shell->>Worker: Publish
     Worker->>Graph: Revalidate and create Clean Microphone
+    Worker->>Graph: Initialize volume/mute from physical mic; virtual gain stays unity
+    Graph-->>Worker: Initial volume acknowledged
     Graph-->>Worker: Owned virtual source confirmed
     Worker-->>Shell: Active proof + virtual source identity
     Shell-->>User: Backend and activity on tile
@@ -98,6 +106,33 @@ processes the installed default model, then rescales/clamps. SpeexDSP preprocess
 S16 frames. WebRTC uses `appsrc → webrtcdsp → appsink` with echo cancellation off.
 All engines reject invalid samples. Output gain applies only to filtered audio;
 underrun produces silence. There is no raw passthrough or automatic engine substitution.
+
+## Shared microphone volume
+
+Clean Microphone starts with the selected physical microphone's current volume and
+mute state. While enabled, changes to either device are mirrored to the other,
+including while capture is idle. The binding uses linear SPA amplitudes, so desktop
+cubic percentage scaling is preserved. The mono slider represents the physical
+device's highest channel volume; virtual edits preserve physical channel balance.
+Raising an all-zero source sets each channel to the requested level.
+
+The owned output adapter sets `channelmix.min-volume` and `channelmix.max-volume`
+to unity. It reports the mirrored `channelVolumes` to desktop mixers without
+applying a second gain to filtered samples; mute remains effective. The separate
+saved DSP output-level option still applies after suppression. Virtual volume
+restoration is disabled: the source is authoritative at startup, and initial
+volume acknowledgment gates publication/activity. No physical volume is written
+to initialize the virtual source.
+
+The standard distro WirePlumber mixer API handles device Route versus node Props
+controls. Its change signals only schedule graph revalidation. Volume writes run
+after the lifecycle verifies identities/providers and, once output exists, the
+owned exact route. Physical writes are serialized; newer virtual edits coalesce
+while a write is pending, and actual hardware rounding is mirrored back. Physical
+edits win simultaneous changes. Missing controls, rejected writes or a two-second
+acknowledgment timeout revoke the session. Closing cancels the owned mixer load,
+disconnects signals and permanently stops synchronization. The physical mic keeps
+its last user-requested level after disable; no volume state is saved in GSettings.
 
 ## Idle and resume within an authorized session
 

@@ -42,6 +42,8 @@ Do not claim RNNoise is packaged on every distro release.
 - `extension/worker/main.py`: source-only process, protocol, parent supervision.
 - `extension/worker/lifecycle.py`: GI-independent identity and routing decisions.
 - `extension/worker/routing.py`: Wp 0.5 introspection, registry and owned exact link.
+- `extension/worker/mixer.py` and `volume.py`: session-scoped volume/mute proxy,
+  distro mixer API, serialized physical writes and bounded acknowledgments.
 - `extension/worker/streaming.py`: GStreamer capture/output and bounded filtered queue.
 - `extension/worker/dsp.py`: typed ctypes RNNoise API, 480-sample framing/scaling.
 - `extension/worker/engines.py`: RNNoise/SpeexDSP/WebRTC factory, strict config

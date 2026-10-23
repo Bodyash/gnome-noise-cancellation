@@ -1,5 +1,6 @@
 """GStreamer audio lives in the worker process, never GNOME Shell."""
 import collections
+import json
 import sys
 import threading
 import time
@@ -82,12 +83,22 @@ def configure_output(pipeline, app, sink):
     sink.set_property('enable-last-sample', False)
 
 
-def make_output(token):
+def make_output(token, volume=None):
     pipeline = Gst.Pipeline.new(None)
     app, sink = element('appsrc'), element('pipewiresink')
     configure_output(pipeline, app, sink)
     sink.set_property('mode', 2)  # provide: export a source instead of rendering to a speaker
-    sink.set_property('stream-properties', stream_properties(token, 'source'))
+    props = stream_properties(token, 'source')
+    # Report the proxy's requested volume, but let only the physical microphone
+    # apply gain. PipeWire clamps the channel mix's applied gain to unity while
+    # retaining the reported channelVolumes. Mute still works in the adapter.
+    for key, value in {'channelmix.min-volume': '1.0', 'channelmix.max-volume': '1.0',
+                       'state.restore-props': 'false'}.items():
+        props.set_value(key, value)
+    if volume is not None:
+        props.set_value('node.param.Props', json.dumps({'channelVolumes': list(volume.mono().channels),
+            'mute': volume.mute}, allow_nan=False))
+    sink.set_property('stream-properties', props)
     for item in [app, sink]: pipeline.add(item)
     if not app.link(sink): raise RuntimeError('Cannot link filtered virtual microphone pipeline.')
     return pipeline, app, sink
@@ -363,7 +374,8 @@ class AudioDriver:
         if self.output is not None: raise ValueError('Output publication cannot be repeated.')
         if not self._valid() or self.frames < 1:
             raise ValueError('No verified filtered input is ready for publication.')
-        self.output, app, _sink = make_output(token)
+        self.set_delivery(False)  # publication also waits for the initial mixer acknowledgment
+        self.output, app, _sink = make_output(token, self.registry.mixer.initial_volume())
         self._watch_bus(self.output)
         app.connect('need-data', self._need_data)
         self._start_pipeline(self.output, 'output')
@@ -392,6 +404,9 @@ class AudioDriver:
 
     def create_link(self, source, capture): self.registry.create_link(source, capture)
     def owns_link(self, ident): return self.registry is not None and self.registry.link_id == ident
+    def sync_volume(self, source, output=None):
+        if self._stopped.is_set() or self.processor.revoked: return False
+        return self.registry.mixer.sync(source, output)
 
     def revoke(self):
         self.processor.revoke()

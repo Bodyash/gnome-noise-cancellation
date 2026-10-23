@@ -135,6 +135,23 @@ It uses memory GSettings, a fake runtime probe and workspace-local caches. Repor
 blocked socket/display rather than falling back to the live desktop. Static
 preferences checks need no display. See [verification evidence](VERIFICATION.md).
 
+Optional native volume proxy test:
+
+```sh
+python3 -B tools/test-volume.py
+```
+
+This explicitly starts an owned, isolated PipeWire server with synthetic sources
+and consumers. Its private server/client configuration, sockets and temporary logs
+stay under `build/`. It loads no hardware or WirePlumber policy and never connects
+to the desktop graph. It uses existing runtimes and needs permission to bind a
+private Unix socket; report a blocked socket rather than using the desktop server.
+Checks cover initial volume, changes in both directions, mute, and actual nonzero
+samples proving that the virtual adapter does not apply gain twice. The fixture
+injects a known test signal at the filtered output boundary; regular headless
+tests exercise the real DSP engines separately. Desktop GNOME sliders, hardware
+mixer rounding and other distributions still require manual testing.
+
 ## GitHub Actions and releases
 
 [The workflow](../.github/workflows/release.yml) runs on pushed `v*` tags, or manually

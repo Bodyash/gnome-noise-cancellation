@@ -39,8 +39,9 @@ Node.js and a Mermaid renderer are not installed.
 | Check | Result / scope |
 | --- | --- |
 | JavaScript | 159 cases: lifecycle, processes, dependencies, protocol, discovery, preferences, settings, rapid changes, presentation and diagnostics |
-| Python | 75 unittest methods plus table-driven scenarios: DSP, streaming, worker protocol, identity/routing, cleanup, headless runner and analysis gate |
+| Python | 99 unittest methods plus table-driven scenarios: DSP, streaming, worker protocol, identity/routing, volume/mute, cleanup, headless runner and analysis gate |
 | Native synthetic audio | RNNoise, SpeexDSP and WebRTC produce nonzero downstream samples before and after idle; idle output is silent |
+| Isolated native volume | Opt-in private PipeWire server: starts at 50%, virtual 80% updates a synthetic source, physical edits/mute mirror back, actual nonzero downstream samples retain unity virtual gain |
 | Conversion | Synthetic GStreamer 44.1 → 48 kHz followed by real RNNoise |
 | Runtime self-check | All three installed engines ready; capture/output constructed in NULL and registry ABI checked without server connection |
 | Static APIs | 10 Shell imports checked against installed GNOME 51 resources; GTK4/libadwaita properties/methods checked via introspection |
@@ -93,6 +94,22 @@ output clock pacing, bounded queues, idle reset/flush, brief consumer churn and
 revocation during idle settling. Delivery/capture generations reject old frames
 and prevent an old DSP completion from proving fresh resume readiness.
 
+Volume regressions cover source-authoritative initialization, linear/cubic levels,
+channel balance, zero/mute, hardware rounding, simultaneous edits, coalesced rapid
+updates, late mirror echoes, rejected/missing controls, acknowledgment timeouts and
+permanent close. Native GLib variants exercise the distro mixer's request format.
+Lifecycle regressions require mixer readiness before capture/publication and reject
+volume writes after identity loss. The runtime check verifies that the existing
+WirePlumber mixer module is present without connecting to a server.
+
+`python3 -B tools/test-volume.py` passed against an owned hardware-free PipeWire
+server after authorization to bind its private Unix socket outside the sandbox.
+Its source, consumer and known output signal are synthetic; no desktop server or
+physical device was accessed. The installed PipeWire GStreamer plugin emitted one
+`gst_caps_is_equal` negotiation assertion while the sample/volume/mute checks
+passed. This fixture verifies adapter gain behavior and mixer API integration,
+not hardware or GNOME slider behavior. No extension was installed or enabled.
+
 The settings stress test runs six sessions with 360 pending edits and repeated
 enable/disable requests during delayed startup/teardown. It requires at most one
 owned worker, frozen live settings, latest options after reaping, and no automatic
@@ -113,6 +130,9 @@ are tested with fake graphs and redact serials/session tags.
 - Hardware rate/channel negotiation, reboot preference restoration, fault-to-silence
   timing, actual unplug/replacement, service restarts, latency and CPU under load
   still need systematic integration tests. General desktop success does not measure them.
+- Shared volume/mute needs desktop testing with the actual GNOME controls and
+  physical mixer, including hardware rounding and idle/resume. The existing desktop
+  report predates this change.
 - Fedora and Debian/Ubuntu package names have documented sources; dependency
   installation and desktop operation have not been validated on those distributions.
 - Python worker acceptance by extensions.gnome.org remains unconfirmed.

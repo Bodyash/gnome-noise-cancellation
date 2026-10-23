@@ -183,6 +183,7 @@ class Session:
             if any(wp.get(ident) != serial for ident, serial in self._wp.items()):
                 raise ValueError('The microphone\'s WirePlumber service disappeared or changed.')
             if not self._started:
+                if not self.driver.sync_volume(self.authorization.source_id): return
                 self._started = True
                 self.driver.start_capture(self.authorization, self.token)
                 return
@@ -234,6 +235,9 @@ class Session:
                     raise ValueError('The owned virtual microphone changed or disappeared.')
                 if output and output['props'].get('media.class') == 'Audio/Source':
                     self.output_id = output['id']
+                    if not self.driver.sync_volume(self.authorization.source_id, self.output_id):
+                        self.driver.set_delivery(False)
+                        return
                     if not self.active:
                         self.active = True
                         self.emit('active', **self.proof(True), outputId=self.output_id)

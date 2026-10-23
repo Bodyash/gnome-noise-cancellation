@@ -11,12 +11,14 @@ noise-suppressed **Clean Microphone**. CPU processing, local audio, no cloud.
 flowchart LR
     Mic["Your microphone"] --> DSP["Noise suppression<br/>RNNoise · SpeexDSP · WebRTC"]
     DSP --> Clean["Clean Microphone"] --> Apps["OBS · browsers · calls"]
+    Mic <-.->|"Volume / mute"| Clean
 ```
 
 Select a physical microphone and enable it from Quick Settings. Choose
 **Clean Microphone** in your apps or make it your system default.
 
 - Physical capture sleeps when no app needs it; the virtual microphone stays available.
+- Clean Microphone shares the selected microphone's volume and mute controls.
 - Remembers your preferred microphone across login. Processing always starts disabled.
 - Shows the current backend and activity. Settings open in GNOME's preferences window.
 - Device loss stops the session and requires explicit selection again. No automatic fallback.
