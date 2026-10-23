@@ -7,7 +7,7 @@
 A lightweight **GNOME 51 / PipeWire** extension that gives your apps a
 noise-suppressed **Clean Microphone**. CPU processing, local audio, no cloud.
 
-[▶ Watch the noise cancellation demo](noise-cancellation-demo.mp4)
+https://github.com/user-attachments/assets/e674878d-45e8-4a5e-b22f-3609bf854d6b
 
 ```mermaid
 flowchart LR
